@@ -38,7 +38,7 @@ void init_venc() {
 	print_fmt(L"Initialized Media Foundation\n");
 }
 
-struct hw_encoder select_encoder() {
+struct hw_encoder select_encoder(struct args * args) {
 	MFT_REGISTER_TYPE_INFO input_type = {
 		.guidMajorType = MFMediaType_Video,
 		.guidSubtype = MFVideoFormat_NV12
@@ -63,7 +63,9 @@ struct hw_encoder select_encoder() {
 	acquire_com_arr(activate_arr, count, L"activate_arr");
 
 	UINT best_encoder_idx = 0;
-	struct hw_encoder best = { 0 };
+	struct hw_encoder best = {
+		.args = args
+	};
 
 	for (unsigned int i = 0; i < count; i++) {
 		IMFActivate * activate = activate_arr[i];
@@ -83,12 +85,12 @@ struct hw_encoder select_encoder() {
 
 		enum gpu_vendor vendor = Unknown;
 
-		if (find_str(name, L"Intel") != -1) {
+		if (find_wstr(name, L"Intel") != -1) {
 			vendor = Intel;
 			// TODO: Test this
-		} else if (find_str(name, L"AMD") != -1) {
+		} else if (find_wstr(name, L"AMD") != -1) {
 			vendor = AMD;
-		} else if (find_str(name, L"NVIDIA") != -1) {
+		} else if (find_wstr(name, L"NVIDIA") != -1) {
 			vendor = Nvidia;
 		}
 
@@ -172,12 +174,12 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 		}
 
 		if (vendor == Unknown) {
-			if (find_str(desc.Description, L"Intel") != -1) {
+			if (find_wstr(desc.Description, L"Intel") != -1) {
 				vendor = Intel;
 				// TODO: Test this
-			} else if (find_str(desc.Description, L"AMD") != -1) {
+			} else if (find_wstr(desc.Description, L"AMD") != -1) {
 				vendor = AMD;
-			} else if (find_str(desc.Description, L"NVIDIA") != -1) {
+			} else if (find_wstr(desc.Description, L"NVIDIA") != -1) {
 				vendor = Nvidia;
 			}
 		}
@@ -225,7 +227,9 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 	return d3d;
 }
 
-struct display select_display(struct d3d * d3d, int display_idx) {
+struct display select_display(struct d3d * d3d) {
+	struct args * args = d3d->enc->args;
+
 	struct display disp = {
 		.d3d = d3d
 	};
@@ -242,7 +246,7 @@ struct display select_display(struct d3d * d3d, int display_idx) {
 		check_hresult(hr, L"Failed to enumerate DXGI outputs");
 		acquire_com_obj(output, L"output");
 
-		if (i == display_idx) {
+		if (i == args->display) {
 			disp.output = output;
 			break;
 		}
@@ -391,21 +395,23 @@ struct mf_state activate_encoder(struct d3d * d3d) {
 }
 
 void prepare_for_streaming(struct display * disp, struct mf_state * mf) {
+	struct hw_encoder * enc = mf->d3d->enc;
+	struct args * args = enc->args;
+
 	HRESULT hr = MFCreateMediaType(&mf->out_type);
 	check_hresult(hr, L"Failed to create video disp type");
 	acquire_com_obj(mf->out_type, L"mf->out_type");
 
 	hr = SetGUID(mf->out_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
 	hr |= SetGUID(mf->out_type, &MF_MT_SUBTYPE, &MFVideoFormat_H264);
-	hr |= SetUINT32(mf->out_type, &MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
-	hr |= SetUINT32(mf->out_type, &MF_MT_AVG_BITRATE, 10000000);
+	hr |= SetUINT32(mf->out_type, &MF_MT_MPEG2_PROFILE, args->profile);
+	hr |= SetUINT32(mf->out_type, &MF_MT_AVG_BITRATE, args->bitrate);
 	hr |= SetUINT32(mf->out_type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 	hr |= MFSetAttributeSize((IMFAttributes *)mf->out_type, &MF_MT_FRAME_SIZE, disp->width, disp->height);
-	hr |= MFSetAttributeRatio((IMFAttributes *)mf->out_type, &MF_MT_FRAME_RATE, 30, 1);
+	hr |= MFSetAttributeRatio((IMFAttributes *)mf->out_type, &MF_MT_FRAME_RATE, args->fps, 1);
 	hr |= MFSetAttributeRatio((IMFAttributes *)mf->out_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 	check_hresult(hr, L"Failed to set attributes for output type");
 
-	struct hw_encoder * enc = mf->d3d->enc;
 
 	hr = enc->encoder->lpVtbl->SetOutputType(enc->encoder, mf->out_stream_id, mf->out_type, 0);
 	check_hresult(hr, L"Failed to set output type");
@@ -418,7 +424,7 @@ void prepare_for_streaming(struct display * disp, struct mf_state * mf) {
 	hr |= SetGUID(mf->in_type, &MF_MT_SUBTYPE, &MFVideoFormat_NV12);
 	hr |= SetUINT32(mf->in_type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 	hr |= MFSetAttributeSize((IMFAttributes *)mf->in_type, &MF_MT_FRAME_SIZE, disp->width, disp->height);
-	hr |= MFSetAttributeRatio((IMFAttributes *)mf->in_type, &MF_MT_FRAME_RATE, 30, 1);
+	hr |= MFSetAttributeRatio((IMFAttributes *)mf->in_type, &MF_MT_FRAME_RATE, args->fps, 1);
 	hr |= MFSetAttributeRatio((IMFAttributes *)mf->in_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 	check_hresult(hr, L"Failed to set attributes for input type");
 
@@ -831,8 +837,7 @@ void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
 	struct mp4_file * mp4,
-	long long duration_s,
-	long long target_fps 
+	long long duration_s
 ) {
 	static const long long ticks_per_s = 10000000;
 
@@ -841,6 +846,9 @@ void capture_screen(
 		// TODO: Support encoders that don't allocate output samples
 	};
 
+	struct args * args = mf->d3d->enc->args;
+
+	const long long target_fps = args->fps;
 	const long long frame_interval = ticks_per_s / target_fps;
 	const long long video_len = duration_s * ticks_per_s;
 

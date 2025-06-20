@@ -51,7 +51,11 @@ void * memcpy(void * dest, const void * src, size_t count);
 void * memset(void * dest, int c, size_t count);
 int memcmp(const void * ptr1, const void * ptr2, size_t num);
 
-int find_str(const wchar_t * str, const wchar_t * substr);
+int find_wstr(const wchar_t * str, const wchar_t * substr);
 wchar_t * copy_wstr(wchar_t * dest, const wchar_t * src);
+int wstr_len(const wchar_t * str);
+BOOL wstr_eq(const wchar_t * str1, const wchar_t * str2);
+
+const wchar_t * basename(const wchar_t * path);
 
 const wchar_t * get_guid_name(const GUID * guid);

@@ -20,8 +20,6 @@
 #include "com.h"
 #include <mfobjects.h>
 
-typedef void (*release_members_fn)(IMFAsyncCallback * this);
-
 enum semaphore_status {
 	Done,
 	Timeout,

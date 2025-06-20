@@ -17,6 +17,15 @@
  */
 #include "venc.h"
 #include "com.h"
+#include "args.h"
+#include <codecapi.h>
+
+struct args default_args = {
+	.profile = eAVEncH264VProfile_High,
+	.bitrate = 12000000,
+	.fps = 60,
+	.display = 0
+};
 
 struct hw_encoder enc = { 0 };
 struct d3d d3d = { 0 };
@@ -25,6 +34,104 @@ struct mf_state mf = {
 	.h_d3d_device = INVALID_HANDLE_VALUE
 };
 struct mp4_file mp4 = { 0 };
+
+void print_usage(const wchar_t * exe_name) {
+	print_fmt(
+		L"Usage: %1!s! (FILE) [--profile=base|main|high] [--bitrate=BITRATE] [--fps=FPS] [--display=DISPLAY]\n"
+		L"\n"
+		// TODO: Accelerators to start and stop recording
+		L"Records the screen for 5 seconds. MP4 video will be written to (FILE).\n"
+		L"Options can be provided in addition to the filename:\n"
+		L"  --profile           Sets the H.264 encoding profile. Can be one of \"base\", \"main\", or \"high\".\n"
+		L"                      Default: high\n"
+		L"  --bitrate           Sets the average bitrate for the encoder.\n"
+		L"                      Default: %2!d!\n"
+		L"  --fps               Sets the target frames per second.\n"
+		L"                      Default: %3!d!\n"
+		L"  --display           Sets the display to record. Displays are ordered from 0, the primary display.\n"
+		L"                      Default: %4!d!\n",
+		basename(exe_name),
+		default_args.bitrate,
+		default_args.fps,
+		default_args.display
+	);
+	ExitProcess(0);
+}
+
+void print_help_hint(const wchar_t * exe_name) {
+	print_err_fmt(L"For help: %1!s! --help\n", basename(exe_name));
+	ExitProcess(1);
+}
+
+struct args get_args(int argc, const wchar_t * argv[]) {
+	struct args args = default_args;
+
+	if (argc < 2) {
+		print_usage(argv[0]);
+	}
+
+	int help_opt_idx = get_opt(argc, argv, L"--help");
+	if (help_opt_idx != -1) {
+		print_usage(argv[0]);
+	}
+
+	int file_idx = get_non_opt(argc, argv, 1);
+	if (file_idx == -1) {
+		print_err_fmt(L"Filename was not provided\n");
+		print_help_hint(argv[0]);
+	}
+
+	args.filename = argv[file_idx];
+
+	const wchar_t * profile_opt = get_arg(argc, argv, L"--profile");
+	if (profile_opt) {
+		if (wstr_eq(profile_opt, L"base")) {
+			args.profile = eAVEncH264VProfile_Base;
+		} else if (wstr_eq(profile_opt, L"main")) {
+			args.profile = eAVEncH264VProfile_Main;
+		} else if (wstr_eq(profile_opt, L"high")) {
+			args.profile = eAVEncH264VProfile_High;
+		}
+	}
+
+	const wchar_t * bitrate_opt = get_arg(argc, argv, L"--bitrate");
+	if (bitrate_opt) {
+		struct convert_result bitrate_result = wstr_to_ui(bitrate_opt);
+
+		if (bitrate_result.status) {
+			args.bitrate = bitrate_result.ui;
+		} else {
+			print_err_fmt(L"--bitrate must be an unsigned int, received %1!s!\n", bitrate_opt);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * fps_opt = get_arg(argc, argv, L"--fps");
+	if (fps_opt) {
+		struct convert_result fps_result = wstr_to_ui(fps_opt);
+
+		if (fps_result.status) {
+			args.fps = fps_result.ui;
+		} else {
+			print_err_fmt(L"--fps must be an unsigned int, received %1!s!\n", fps_opt);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * display_opt = get_arg(argc, argv, L"--display");
+	if (display_opt) {
+		struct convert_result display_result = wstr_to_ui(display_opt);
+
+		if (display_result.status) {
+			args.display = display_result.ui;
+		} else {
+			print_err_fmt(L"--display must be an unsigned int, received %1!s!\n", display_opt);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	return args;
+}
 
 BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 	switch (ctrl_type) {
@@ -58,6 +165,8 @@ void exit_process(UINT code) {
 }
 
 int wmain(DWORD argc, LPCWSTR argv[]) {
+	struct args args = get_args(argc, argv);
+
 	SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
 	HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -65,7 +174,7 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 
 	init_venc();
 
-	enc = select_encoder();
+	enc = select_encoder(&args);
 	if (! enc.status) {
 		print_err_fmt(L"Failed to select an encoder\n");
 		return 1;
@@ -79,7 +188,7 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 	}
 	print_fmt(L"Selected DXGI adapter: %1!s!\n", d3d.adapter_desc);
 
-	disp = select_display(&d3d, 0);
+	disp = select_display(&d3d);
 	if (! disp.status) {
 		print_err_fmt(L"Failed to select a display\n");
 		return 1;
@@ -94,10 +203,12 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 
 	prepare_for_streaming(&disp, &mf);
 
-	mp4 = prepare_mp4_file(L"video.mp4");
+	mp4 = prepare_mp4_file(args.filename);
 
+	// Wait a bit - D3D won't have a frame ready if we don't
+	// TODO: Properly handle case where D3D doesn't have a frame ready
 	Sleep(20);
-	capture_screen(&disp, &mf, &mp4, 5, 30);
+	capture_screen(&disp, &mf, &mp4, 5);
 
 	return 0;
 }

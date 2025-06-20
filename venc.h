@@ -73,7 +73,16 @@ enum gpu_vendor {
 	Intel = 2
 };
 
+struct args {
+	const wchar_t * filename;
+	enum eAVEncH264VProfile profile;
+	unsigned int bitrate;
+	unsigned int fps;
+	unsigned int display;
+};
+
 struct hw_encoder {
+	struct args * args;
 	IMFActivate * activate;
 	IMFTransform * encoder;
 	wchar_t * name;
@@ -138,16 +147,16 @@ void init_venc();
 // Selects a hardware encoder capable of encoding NV12 to H.264. Prioritizes
 // based on vendor first, then merit. Returns a zeroed struct if no encoder
 // was found.
-struct hw_encoder select_encoder();
+struct hw_encoder select_encoder(struct args * args);
 
 // Selects a DXGI adapter based on the chosen encoder. It is crucial that the encoder
 // and the DXGI device correspond to the same piece of hardware. Returns a zeroed struct
 // (except enc) if no device was found.
 struct d3d select_dxgi_adapter(struct hw_encoder * enc);
 
-// Selects a D3D display to be recorded. Exits the process if `display_idx` doesn't
-// correspond to an actual display.
-struct display select_display(struct d3d * d3d, int display_idx);
+// Selects a D3D display to be recorded. The display index is given by the args struct
+// owned by d3d->enc.
+struct display select_display(struct d3d * d3d);
 
 // Activates the previously selected encoder.
 struct mf_state activate_encoder(struct d3d * d3d);
@@ -164,9 +173,7 @@ void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
 	struct mp4_file * mp4,
-	long long duration_s,
-	// TODO: Make this configurable
-	long long target_fps
+	long long duration_s
 );
 
 // These functions release the resources held by each struct, but they do NOT

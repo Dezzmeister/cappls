@@ -12,7 +12,7 @@ endif()
 project ("cappls")
 
 # Add source to this project's executable.
-add_executable (cappls "lib.h" "lib.c" "venc.h" "main.c" "com.h" "com.c" "venc.c" "async_callbacks.h" "async_callbacks.c")
+add_executable (cappls "lib.h" "lib.c" "venc.h" "main.c" "com.h" "com.c" "venc.c" "async_callbacks.h" "async_callbacks.c" "args.h" "args.c")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET cappls PROPERTY C_STANDARD 23)

@@ -229,7 +229,7 @@ int memcmp(const void * ptr1, const void * ptr2, size_t num) {
     return 0;
 }
 
-int find_str(const wchar_t * str, const wchar_t * substr) {
+int find_wstr(const wchar_t * str, const wchar_t * substr) {
     int i = 0;
     int sub_i = 0;
     int start = 0;
@@ -259,9 +259,50 @@ int find_str(const wchar_t * str, const wchar_t * substr) {
 }
 
 wchar_t * copy_wstr(wchar_t * dest, const wchar_t * src) {
-    while ((*dest++ = *src++) != L'\0');
+    int i = 0;
+
+    while ((dest[i] = src[i]) != L'\0') {
+        i++;
+    }
 
     return dest;
+}
+
+int wstr_len(const wchar_t * str) {
+    int i = 0;
+
+    while (str[i++]);
+
+    return i - 1;
+}
+
+BOOL wstr_eq(const wchar_t * str1, const wchar_t * str2) {
+    int i = 0;
+    wchar_t c1;
+    wchar_t c2;
+
+    while (((c1 = str1[i]) != L'\0') && ((c2 = str2[i]) != L'\0')) {
+        if (c1 != c2) {
+            return FALSE;
+        }
+
+        i++;
+    }
+
+    return str1[i] == str2[i];
+}
+
+const wchar_t * basename(const wchar_t * path) {
+    int len = wstr_len(path);
+    int i = len;
+
+    while (i >= 0 && (path[i--] != L'\\'));
+
+    if (path[i + 1] == L'\\') {
+        return path + i + 2;
+    }
+
+    return path + i + 1;
 }
 
 const wchar_t * get_guid_name(const GUID * guid) {
