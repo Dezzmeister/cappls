@@ -18,6 +18,7 @@
 #include "venc.h"
 #include "com.h"
 #include "async_callbacks.h"
+#include "input.h"
 #include <propvarutil.h>
 #include <codecapi.h>
 #include <Mferror.h>
@@ -836,8 +837,7 @@ BOOL process_mft_events(
 void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
-	struct mp4_file * mp4,
-	long long duration_s
+	struct mp4_file * mp4
 ) {
 	static const long long ticks_per_s = 10000000;
 
@@ -850,9 +850,13 @@ void capture_screen(
 
 	const long long target_fps = args->fps;
 	const long long frame_interval = ticks_per_s / target_fps;
-	const long long video_len = duration_s * ticks_per_s;
 
 	struct hw_encoder * enc = mf->d3d->enc;
+
+	while (! mp4->recording) {
+		process_messages();
+		Sleep(0);
+	}
 
 	LARGE_INTEGER freq;
 	LARGE_INTEGER now;
@@ -880,7 +884,13 @@ void capture_screen(
 	hr = enc->encoder->lpVtbl->ProcessMessage(enc->encoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 	check_hresult(hr, L"Failed to begin streaming (2)");
 
-	while (now_ticks < (start_ticks + video_len)) {
+	while (mp4->recording) {
+		process_messages();
+
+		if (! mp4->recording) {
+			break;
+		}
+
 		BOOL can_accept_frame = process_mft_events(mf, mp4, &output_buf);
 
 		QueryPerformanceCounter(&now);

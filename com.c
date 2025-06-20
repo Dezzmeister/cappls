@@ -130,7 +130,8 @@ UINT release_all_com_objs_local(struct com_obj ** objs) {
 UINT release_com_node(struct com_obj * node, const wchar_t * context) {
 	UINT num_freed = 1;
 
-	print_fmt(L"(Context: %1!s!): Releasing %2!s!\n", context, node->name);
+	// TODO: Log levels
+	// print_fmt(L"(Context: %1!s!): Releasing %2!s!\n", context, node->name);
 
 	if (node->count == 0) {
 		Release((IUnknown *)node->obj);

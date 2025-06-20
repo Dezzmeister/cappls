@@ -18,29 +18,30 @@
 #include "venc.h"
 #include "com.h"
 #include "args.h"
+#include "input.h"
 #include <codecapi.h>
 
-struct args default_args = {
+static struct args default_args = {
 	.profile = eAVEncH264VProfile_High,
 	.bitrate = 12000000,
 	.fps = 60,
 	.display = 0
 };
 
-struct hw_encoder enc = { 0 };
-struct d3d d3d = { 0 };
-struct display disp = { 0 };
-struct mf_state mf = {
+static struct hw_encoder enc = { 0 };
+static struct d3d d3d = { 0 };
+static struct display disp = { 0 };
+static struct mf_state mf = {
 	.h_d3d_device = INVALID_HANDLE_VALUE
 };
-struct mp4_file mp4 = { 0 };
+static struct mp4_file mp4 = { 0 };
 
-void print_usage(const wchar_t * exe_name) {
+static void print_usage(const wchar_t * exe_name) {
 	print_fmt(
 		L"Usage: %1!s! (FILE) [--profile=base|main|high] [--bitrate=BITRATE] [--fps=FPS] [--display=DISPLAY]\n"
 		L"\n"
-		// TODO: Accelerators to start and stop recording
-		L"Records the screen for 5 seconds. MP4 video will be written to (FILE).\n"
+		L"Records the screen. MP4 video will be written to (FILE). Screen recording starts when CTRL+SHIFT+.\n"
+		L"(ctrl + shift + period) is pressed, and ends when CTRL+SHIFT+. is pressed again.\n"
 		L"Options can be provided in addition to the filename:\n"
 		L"  --profile           Sets the H.264 encoding profile. Can be one of \"base\", \"main\", or \"high\".\n"
 		L"                      Default: high\n"
@@ -58,12 +59,20 @@ void print_usage(const wchar_t * exe_name) {
 	ExitProcess(0);
 }
 
-void print_help_hint(const wchar_t * exe_name) {
+static void print_help_hint(const wchar_t * exe_name) {
 	print_err_fmt(L"For help: %1!s! --help\n", basename(exe_name));
 	ExitProcess(1);
 }
 
-struct args get_args(int argc, const wchar_t * argv[]) {
+void on_combo_pressed() {
+	mp4.recording = !mp4.recording;
+
+	if (mp4.recording) {
+		print_fmt(L"Press CTRL+SHIFT+. (ctrl + shift + period) again to stop recording\n");
+	}
+}
+
+static struct args get_args(int argc, const wchar_t * argv[]) {
 	struct args args = default_args;
 
 	if (argc < 2) {
@@ -133,16 +142,16 @@ struct args get_args(int argc, const wchar_t * argv[]) {
 	return args;
 }
 
-BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
+static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 	switch (ctrl_type) {
 		case CTRL_C_EVENT:
 		case CTRL_BREAK_EVENT:
 		case CTRL_CLOSE_EVENT:
 		case CTRL_LOGOFF_EVENT:
-		case CTRL_SHUTDOWN_EVENT: {
+		case CTRL_SHUTDOWN_EVENT:
+			print_fmt(L"Interrupted (code: %1!d!)\n", ctrl_type);
 			exit_process(0);
 			return TRUE;
-		}
 		default:
 			return FALSE;
 	}
@@ -158,6 +167,8 @@ void exit_process(UINT code) {
 	UINT freed_obj_count = release_all_com_objs();
 
 	print_fmt(L"Released %1!d! COM object(s)\n", freed_obj_count);
+
+	uninstall_hook();
 
 	MFShutdown();
 	CoUninitialize();
@@ -208,7 +219,9 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 	// Wait a bit - D3D won't have a frame ready if we don't
 	// TODO: Properly handle case where D3D doesn't have a frame ready
 	Sleep(20);
-	capture_screen(&disp, &mf, &mp4, 5);
+	install_hook();
+	print_fmt(L"Press CTRL+SHIFT+. (ctrl + shift + period) to start recording\n");
+	capture_screen(&disp, &mf, &mp4);
 
 	return 0;
 }

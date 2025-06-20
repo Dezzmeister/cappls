@@ -132,12 +132,15 @@ HRESULT __stdcall mp4_event_callback_Invoke(
 		}
 	}
 
+	// TODO: Log levels
+	/*
 	print_fmt(
 		L"(MP4 Sink Event): [type: %1!d!] [status: 0x%2!x!] [value: %3!s!]\n",
 		type,
 		status,
 		buf
 	);
+	*/
 
 	if (type == MEStreamSinkMarker && val.vt == VT_UI4 && val.ulVal == MFSTREAMSINK_MARKER_ENDOFSEGMENT) {
 		BOOL signal_status = ReleaseSemaphore(

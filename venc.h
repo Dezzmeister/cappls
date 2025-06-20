@@ -139,6 +139,7 @@ struct mp4_file {
 	IMFPresentationClock * clock;
 	IMFAsyncCallback * event_callback;
 	PROPVARIANT end_of_segment_val;
+	BOOL recording;
 };
 
 // Initializes Media Foundation
@@ -168,12 +169,13 @@ void prepare_for_streaming(struct display * disp, struct mf_state * mf);
 // a file or initialize any of the mp4 COM objects.
 struct mp4_file prepare_mp4_file(const wchar_t * name);
 
-// Records the selected display for the given duration, at the given `target_fps`.
+// Records the selected display until `mp4->recording` is set to false. Starts
+// recording when `mp4->recording` is set to true. Drains the message queue before
+// each frame, and while waiting to start recording.
 void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
-	struct mp4_file * mp4,
-	long long duration_s
+	struct mp4_file * mp4
 );
 
 // These functions release the resources held by each struct, but they do NOT
