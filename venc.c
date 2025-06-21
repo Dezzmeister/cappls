@@ -23,6 +23,11 @@
 #include <codecapi.h>
 #include <Mferror.h>
 
+// DEADBEEF-1234-4567-DEAD-BEEFAAAAAAAA
+// UINT32 on IMFSample: stores the sample's index in the NV12 pool
+DEFINE_GUID(PRIVATE_SAMPLE_BUF_IDX,
+	0xDEADBEEF, 0x1234, 0x4567, 0xDE, 0xAD, 0xBE, 0xEF, 0xAA, 0xAA, 0xAA, 0xAA);
+
 struct in_out_stream_ids {
 	DWORD in_stream_id;
 	DWORD out_stream_id;
@@ -228,6 +233,85 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 	return d3d;
 }
 
+// Creates the output segments of the BGRA8 -> NV12 pipeline, as well as the backup
+// NV12 texture. This only needs to be created once.
+static void create_nv12_frame_buffers(struct display * disp) {
+	struct d3d * d3d = disp->d3d;
+
+	D3D11_TEXTURE2D_DESC nv12_desc = {
+		.Width = disp->width,
+		.Height = disp->height,
+		.MipLevels = 1,
+		.ArraySize = 1,
+		.Usage = D3D11_USAGE_DEFAULT,
+		.SampleDesc = {
+			.Count = 1
+		},
+		.Format = DXGI_FORMAT_NV12,
+		.CPUAccessFlags = 0,
+		.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+		.MiscFlags = 0
+	};
+
+	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
+		struct frame_buffer * buf = disp->nv12_frame_pool + i;
+
+		if (buf->nv12_tex) {
+			release_com_obj(buf->nv12_tex);
+		}
+
+		if (buf->nv12_dxgi_surface) {
+			release_com_obj(buf->nv12_dxgi_surface);
+		}
+
+		if (buf->output_view) {
+			release_com_obj(buf->output_view);
+		}
+
+		if (buf->mf_buffer) {
+			release_com_obj(buf->mf_buffer);
+		}
+
+		buf->is_free = TRUE;
+
+		HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &buf->nv12_tex);
+		check_hresult(hr, L"Failed to create NV12 texture");
+		acquire_com_obj(buf->nv12_tex, L"buf->nv12_tex");
+
+		hr = QueryInterface(buf->nv12_tex, &IID_IDXGISurface, (void **)&buf->nv12_dxgi_surface);
+		check_hresult(hr, L"Failed to get IDXGISurface from NV12 texture");
+		acquire_com_obj(buf->nv12_dxgi_surface, L"buf->nv12_dxgi_surface");
+
+		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {
+			.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D
+		};
+
+		hr = disp->video_device->lpVtbl->CreateVideoProcessorOutputView(
+			disp->video_device,
+			(ID3D11Resource *)buf->nv12_tex,
+			disp->video_processor_enum,
+			&output_view_desc,
+			&buf->output_view
+		);
+		check_hresult(hr, L"Failed to create video processor output view");
+		acquire_com_obj(buf->output_view, L"buf->output_view");
+
+		hr = MFCreateDXGISurfaceBuffer(
+			&IID_ID3D11Texture2D,
+			(IUnknown *)buf->nv12_dxgi_surface,
+			0,
+			FALSE,
+			&buf->mf_buffer
+		);
+		check_hresult(hr, L"Failed to create MF DXGI surface buffer");
+		acquire_com_obj(buf->mf_buffer, L"buf->mf_buffer");
+	}
+
+	HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &disp->prev_nv12_frame);
+	check_hresult(hr, L"Failed to create backup NV12 texture");
+	acquire_com_obj(disp->prev_nv12_frame, L"disp->prev_nv12_frame");
+}
+
 struct display select_display(struct d3d * d3d) {
 	struct args * args = d3d->enc->args;
 
@@ -298,6 +382,8 @@ struct display select_display(struct d3d * d3d) {
 	hr = disp.video_device->lpVtbl->CreateVideoProcessor(disp.video_device, disp.video_processor_enum, 0, &disp.video_processor);
 	check_hresult(hr, L"Failed to create video processor");
 	acquire_com_obj(disp.video_processor, L"disp.video_processor");
+
+	create_nv12_frame_buffers(&disp);
 
 	disp.status = 1;
 
@@ -551,27 +637,46 @@ struct mp4_file prepare_mp4_file(const wchar_t * name) {
 	return mp4;
 }
 
-static void capture_frame(struct display * disp) {
-	DXGI_OUTDUPL_FRAME_INFO frame_info;
-	IDXGIResource * desktop_resource;
-
-	HRESULT hr = disp->dup->lpVtbl->AcquireNextFrame(disp->dup, 1000, &frame_info, &desktop_resource);
-	check_hresult(hr, L"Failed to acquire next frame");
-	acquire_com_obj(desktop_resource, L"desktop_resource");
-
-	hr = QueryInterface(desktop_resource, &IID_ID3D11Texture2D, (void **)&disp->frame);
-	check_hresult(hr, L"Failed to get frame as texture");
-	acquire_com_obj(disp->frame, L"frame");
-	release_com_obj(desktop_resource);
-}
-
-static void release_frame(struct display * disp) {
-	release_com_obj(disp->frame);
+static void release_frame(struct display * disp, ID3D11Texture2D * frame) {
+	release_com_obj(frame);
 	disp->dup->lpVtbl->ReleaseFrame(disp->dup);
-	disp->frame = NULL;
 }
 
-static IMFSample * capture_video_frame(
+// (Re)creates the input segment of the BGRA8 -> NV12 pipeline. We only need
+// to recreate this when the frame pointer returned by the D3D duplication API
+// has changed.
+static void create_nv12_conv_input(struct display * disp, ID3D11Texture2D * frame) {
+	struct d3d * d3d = disp->d3d;
+
+	if (disp->input_view) {
+		release_com_obj(disp->input_view);
+		disp->input_view = NULL;
+	}
+
+	disp->prev_dup_frame = frame;
+
+	D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {
+		.FourCC = 0,
+		.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D
+	};
+
+	HRESULT hr = disp->video_device->lpVtbl->CreateVideoProcessorInputView(
+		disp->video_device,
+		(ID3D11Resource *)frame,
+		disp->video_processor_enum,
+		&input_view_desc,
+		&disp->input_view
+	);
+	check_hresult(hr, L"Failed to create video processor input view");
+	acquire_com_obj(disp->input_view, L"disp->input_view");
+
+	disp->stream = (D3D11_VIDEO_PROCESSOR_STREAM){
+		.Enable = TRUE,
+		.pInputSurface = disp->input_view
+	};
+}
+
+static struct frame_buffer * capture_video_frame(
 	struct display * disp,
 	struct mf_state * mf,
 	LONGLONG time,
@@ -579,117 +684,93 @@ static IMFSample * capture_video_frame(
 ) {
 	const struct d3d * d3d = mf->d3d;
 
-	capture_frame(disp);
+	int nv12_frame_idx = -1;
 
-	D3D11_TEXTURE2D_DESC frame_desc;
-	disp->frame->lpVtbl->GetDesc(disp->frame, &frame_desc);
+	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
+		if (disp->nv12_frame_pool[i].is_free) {
+			nv12_frame_idx = i;
+			break;
+		}
+	}
 
-	D3D11_TEXTURE2D_DESC nv12_desc = {
-		.Width = frame_desc.Width,
-		.Height = frame_desc.Height,
-		.MipLevels = 1,
-		.ArraySize = 1,
-		.Usage = D3D11_USAGE_DEFAULT,
-		.SampleDesc = {
-			.Count = 1,
-		},
-		.Format = DXGI_FORMAT_NV12,
-		.CPUAccessFlags = 0,
-		.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
-		.MiscFlags = 0
-	};
+	if (nv12_frame_idx == -1) {
+		// TODO: Make buffer size configurable
+		print_err_fmt(L"No more NV12 output frames available\n");
+		exit_process(1);
+	}
 
-	ID3D11Texture2D * nv12_tex;
-	HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &nv12_tex);
-	check_hresult(hr, L"Failed to create NV12 texture");
-	acquire_com_obj(nv12_tex, L"nv12_tex");
+	struct frame_buffer * nv12_frame = disp->nv12_frame_pool + nv12_frame_idx;
+	nv12_frame->is_free = FALSE;
 
-	IDXGISurface * nv12_dxgi_surface;
-	hr = QueryInterface(nv12_tex, &IID_IDXGISurface, (void **)&nv12_dxgi_surface);
-	check_hresult(hr, L"Failed to get IDXGISurface from NV12 texture");
-	acquire_com_obj(nv12_dxgi_surface, L"nv12_dxgi_surface");
-	release_com_obj(nv12_tex);
+	DXGI_OUTDUPL_FRAME_INFO frame_info;
+	IDXGIResource * desktop_resource = NULL;
+	ID3D11Texture2D * frame;
 
-	D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {
-		.FourCC = 0,
-		.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D
-	};
+	HRESULT hr = disp->dup->lpVtbl->AcquireNextFrame(disp->dup, 1, &frame_info, &desktop_resource);
+	if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+		d3d->context->lpVtbl->CopyResource(
+			d3d->context,
+			(ID3D11Resource *)nv12_frame->nv12_tex,
+			(ID3D11Resource *)disp->prev_nv12_frame
+		);
+	} else {
+		check_hresult(hr, L"Failed to acquire next frame");
+		acquire_com_obj(desktop_resource, L"desktop_resource");
 
-	ID3D11VideoProcessorInputView * input_view;
-	hr = disp->video_device->lpVtbl->CreateVideoProcessorInputView(
-		disp->video_device,
-		(ID3D11Resource *)disp->frame,
-		disp->video_processor_enum,
-		&input_view_desc,
-		&input_view
-	);
-	check_hresult(hr, L"Failed to create video processor input view");
-	acquire_com_obj(input_view, L"input_view");
+		hr = QueryInterface(desktop_resource, &IID_ID3D11Texture2D, (void **)&frame);
+		check_hresult(hr, L"Failed to get frame as texture");
+		acquire_com_obj(frame, L"frame");
 
-	D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {
-		.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D
-	};
+		if (frame != disp->prev_dup_frame) {
+			print_fmt(L"Recreating BGRA8 -> NV12 conversion input\n");
+			create_nv12_conv_input(disp, frame);
+		}
 
-	ID3D11VideoProcessorOutputView * output_view;
-	hr = disp->video_device->lpVtbl->CreateVideoProcessorOutputView(
-		disp->video_device,
-		(ID3D11Resource *)nv12_tex,
-		disp->video_processor_enum,
-		&output_view_desc,
-		&output_view
-	);
-	check_hresult(hr, L"Failed to create video processor output view");
-	acquire_com_obj(output_view, L"output_view");
+		hr = disp->video_context->lpVtbl->VideoProcessorBlt(
+			disp->video_context,
+			disp->video_processor,
+			nv12_frame->output_view,
+			0,
+			1,
+			&disp->stream
+		);
+		check_hresult(hr, L"Failed to convert captured frame to NV12");
 
-	D3D11_VIDEO_PROCESSOR_STREAM stream = {
-		.Enable = TRUE,
-		.pInputSurface = input_view
-	};
-
-	hr = disp->video_context->lpVtbl->VideoProcessorBlt(
-		disp->video_context,
-		disp->video_processor,
-		output_view,
-		0,
-		1,
-		&stream
-	);
-	check_hresult(hr, L"Failed to convert captured frame to NV12");
-	release_com_obj(output_view);
-	release_com_obj(input_view);
+		d3d->context->lpVtbl->CopyResource(
+			d3d->context,
+			(ID3D11Resource *)disp->prev_nv12_frame,
+			(ID3D11Resource *)nv12_frame->nv12_tex
+		);
+	}
 
 	d3d->context->lpVtbl->Flush(d3d->context);
 
-	IMFMediaBuffer * mf_buffer;
-	hr = MFCreateDXGISurfaceBuffer(
-		&IID_ID3D11Texture2D,
-		(IUnknown *)nv12_dxgi_surface,
-		0,
-		FALSE,
-		&mf_buffer
-	);
-	check_hresult(hr, L"Failed to create MF DXGI surface buffer");
-	acquire_com_obj(mf_buffer, L"mf_buffer");
-	release_com_obj(nv12_dxgi_surface);
+	if (nv12_frame->sample) {
+		release_com_obj(nv12_frame->sample);
+	}
 
-	IMFSample * sample;
-	hr = MFCreateSample(&sample);
+	hr = MFCreateSample(&nv12_frame->sample);
 	check_hresult(hr, L"Failed to create MF sample");
-	acquire_com_obj(sample, L"sample");
+	acquire_com_obj(nv12_frame->sample, L"nv12_frame->sample");
 
-	hr = sample->lpVtbl->AddBuffer(sample, mf_buffer);
+	hr = nv12_frame->sample->lpVtbl->AddBuffer(nv12_frame->sample, nv12_frame->mf_buffer);
 	check_hresult(hr, L"Failed to add buffer to sample");
-	release_com_obj(mf_buffer);
 
-	hr = sample->lpVtbl->SetSampleTime(sample, time);
+	hr = nv12_frame->sample->lpVtbl->SetSampleTime(nv12_frame->sample, time);
 	check_hresult(hr, L"Failed to set sample time");
 
-	hr = sample->lpVtbl->SetSampleDuration(sample, duration);
+	hr = nv12_frame->sample->lpVtbl->SetSampleDuration(nv12_frame->sample, duration);
 	check_hresult(hr, L"Failed to set sample duration");
 
-	release_frame(disp);
+	hr = SetUINT32(nv12_frame->sample, &PRIVATE_SAMPLE_BUF_IDX, nv12_frame_idx);
+	check_hresult(hr, L"Failed to tag sample with buffer index");
 
-	return sample;
+	if (desktop_resource) {
+		release_frame(disp, frame);
+		release_com_obj(desktop_resource);
+	}
+
+	return nv12_frame;
 }
 
 void release_events(MFT_OUTPUT_DATA_BUFFER * output_buf) {
@@ -782,6 +863,7 @@ void handle_stream_change(
 BOOL process_mft_events(
 	struct mf_state * mf,
 	struct mp4_file * mp4,
+	struct display * disp,
 	MFT_OUTPUT_DATA_BUFFER * output_buf
 ) {
 	IMFTransform * enc = mf->d3d->enc->encoder;
@@ -820,6 +902,17 @@ BOOL process_mft_events(
 				hr = mp4->sink->lpVtbl->ProcessSample(mp4->sink, output_buf->pSample);
 				check_hresult(hr, L"Failed to process sample");
 
+				DWORD nv12_frame_idx;
+				hr = GetUINT32(output_buf->pSample, &PRIVATE_SAMPLE_BUF_IDX, &nv12_frame_idx);
+				check_hresult(hr, L"Failed to get sample buffer index tag");
+
+				if (nv12_frame_idx >= NUM_NV12_FRAMES) {
+					print_err_fmt(L"Sample buffer index was unexpectedly out of bounds\n");
+					exit_process(1);
+				}
+
+				disp->nv12_frame_pool[nv12_frame_idx].is_free = TRUE;
+
 				release_com_obj(output_buf->pSample);
 			}
 
@@ -840,6 +933,7 @@ void capture_screen(
 	struct mp4_file * mp4
 ) {
 	static const long long ticks_per_s = 10000000;
+	static const int max_rejected_frames = 5;
 
 	MFT_OUTPUT_DATA_BUFFER output_buf = {
 		.dwStreamID = mf->out_stream_id
@@ -855,7 +949,7 @@ void capture_screen(
 
 	while (! mp4->recording) {
 		process_messages();
-		Sleep(0);
+		Sleep(1);
 	}
 
 	LARGE_INTEGER freq;
@@ -891,7 +985,7 @@ void capture_screen(
 			break;
 		}
 
-		BOOL can_accept_frame = process_mft_events(mf, mp4, &output_buf);
+		BOOL can_accept_frame = process_mft_events(mf, mp4, disp, &output_buf);
 
 		QueryPerformanceCounter(&now);
 
@@ -903,18 +997,35 @@ void capture_screen(
 			frame_ticks = now_ticks;
 			next_frame_target = frame_ticks + frame_interval;
 
-			IMFSample * sample = capture_video_frame(disp, mf, t - start_ticks, duration);
-			hr = enc->encoder->lpVtbl->ProcessInput(enc->encoder, mf->in_stream_id, sample, 0);
-			check_hresult(hr, L"Failed to add sample");
-			release_com_obj(sample);
+			int rejected_frames = 0;
+
+			while (rejected_frames < max_rejected_frames) {
+				struct frame_buffer * buf = capture_video_frame(disp, mf, t - start_ticks, duration);
+				hr = enc->encoder->lpVtbl->ProcessInput(enc->encoder, mf->in_stream_id, buf->sample, 0);
+
+				if (hr == MF_E_NOTACCEPTING) {
+					rejected_frames++;
+					process_mft_events(mf, mp4, disp, &output_buf);
+				} else {
+					check_hresult(hr, L"Failed to add sample");
+					release_com_obj(buf->sample);
+					buf->sample = NULL;
+					break;
+				}
+			}
+
+			if (rejected_frames >= max_rejected_frames) {
+				print_err_fmt(L"Too many frames rejected (%1!d!)\n", rejected_frames);
+				exit_process(1);
+			}
 
 			i++;
 		}
 
-		Sleep(0);
+		Sleep(1);
 	}
 
-	process_mft_events(mf, mp4, &output_buf);
+	process_mft_events(mf, mp4, disp, &output_buf);
 
 	hr = enc->encoder->lpVtbl->ProcessMessage(enc->encoder, MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
 	check_hresult(hr, L"Failed to end streaming");
@@ -1066,8 +1177,36 @@ void free_display(struct display * disp) {
 		release_com_obj(disp->video_processor);
 	}
 
-	if (disp->frame) {
-		release_frame(disp);
+	if (disp->prev_nv12_frame) {
+		release_com_obj(disp->prev_nv12_frame);
+	}
+
+	if (disp->input_view) {
+		release_com_obj(disp->input_view);
+	}
+
+	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
+		struct frame_buffer * buf = disp->nv12_frame_pool + i;
+
+		if (buf->nv12_tex) {
+			release_com_obj(buf->nv12_tex);
+		}
+
+		if (buf->nv12_dxgi_surface) {
+			release_com_obj(buf->nv12_dxgi_surface);
+		}
+
+		if (buf->output_view) {
+			release_com_obj(buf->output_view);
+		}
+
+		if (buf->mf_buffer) {
+			release_com_obj(buf->mf_buffer);
+		}
+
+		if (buf->sample) {
+			release_com_obj(buf->sample);
+		}
 	}
 
 	(*disp) = zero;

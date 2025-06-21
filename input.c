@@ -35,15 +35,15 @@ static LRESULT CALLBACK ll_keyboard_proc(int n_code, WPARAM w_param, LPARAM l_pa
 				case VK_SHIFT:
 				case VK_LSHIFT:
 				case VK_RSHIFT:
-					shift_pressed = key_up;
+					shift_pressed = key_down;
 					break;
 				case VK_CONTROL:
 				case VK_LCONTROL:
 				case VK_RCONTROL:
-					ctrl_pressed = key_up;
+					ctrl_pressed = key_down;
 					break;
 				case VK_OEM_PERIOD:
-					period_pressed = key_up;
+					period_pressed = key_down;
 					break;
 			}
 		}

@@ -37,6 +37,8 @@ DEFINE_GUID(PRIVATE_INTEL_PCI_DEVICE_INSTANCE,
 DEFINE_GUID(MF_MT_D3D_DEVICE,
 	0x85E4DCCF, 0xF1FE, 0x4117, 0x85, 0x4D, 0x7C, 0xDA, 0x2A, 0xCC, 0x2C, 0x77);
 
+#define NUM_NV12_FRAMES							4
+
 #define QueryInterface(obj, iid, out)			(obj)->lpVtbl->QueryInterface((obj), (iid), (out))
 
 #define SetGUID(obj, key, value)				(obj)->lpVtbl->SetGUID((obj), (key), (value))
@@ -101,6 +103,15 @@ struct d3d {
 	unsigned char status;
 };
 
+struct frame_buffer {
+	ID3D11Texture2D * nv12_tex;
+	IDXGISurface * nv12_dxgi_surface;
+	ID3D11VideoProcessorOutputView * output_view;
+	IMFMediaBuffer * mf_buffer;
+	IMFSample * sample;
+	BOOL is_free;
+};
+
 struct display {
 	struct d3d * d3d;
 	IDXGIOutput * output;
@@ -110,7 +121,16 @@ struct display {
 	ID3D11VideoContext * video_context;
 	ID3D11VideoProcessorEnumerator * video_processor_enum;
 	ID3D11VideoProcessor * video_processor;
-	ID3D11Texture2D * frame;
+	// For when the D3D duplication API fails. AcquireNextFrame times out if the
+	// frame hasn't changed before the timeout, which is 1ms in our case. We copy
+	// the previous frame into the selected `frame_buffer` in the NV12 frame pool.
+	ID3D11Texture2D * prev_nv12_frame;
+
+	void * prev_dup_frame;
+	ID3D11VideoProcessorInputView * input_view;
+	D3D11_VIDEO_PROCESSOR_STREAM stream;
+	struct frame_buffer nv12_frame_pool[NUM_NV12_FRAMES];
+
 	int width;
 	int height;
 	unsigned char status;
