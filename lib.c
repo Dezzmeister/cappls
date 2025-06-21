@@ -17,6 +17,7 @@
  */
 #include "lib.h"
 #include "venc.h"
+#include "logging.h"
 #include <mfapi.h>
 #include <mftransform.h>
 #include <ks.h>
@@ -83,7 +84,7 @@ HANDLE std_out;
 HANDLE std_err;
 HANDLE heap;
 
-static LPWSTR vfmt(LPCWSTR fmt_str, va_list args) {
+LPWSTR vfmt(LPCWSTR fmt_str, va_list args) {
     LPWSTR buf = NULL;
     DWORD result = FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_STRING,
@@ -104,28 +105,6 @@ static LPWSTR vfmt(LPCWSTR fmt_str, va_list args) {
     }
 
     return buf;
-}
-
-void print_fmt(LPCWSTR fmt_str, ...) {
-    va_list args;
-    va_start(args, fmt_str);
-
-    LPWSTR msg = vfmt(fmt_str, args);
-    va_end(args);
-
-    WriteConsole(std_out, msg, lstrlenW(msg), NULL, NULL);
-    LocalFree(msg);
-}
-
-void print_err_fmt(LPCWSTR fmt_str, ...) {
-    va_list args;
-    va_start(args, fmt_str);
-
-    LPWSTR msg = vfmt(fmt_str, args);
-    va_end(args);
-
-    WriteConsole(std_err, msg, lstrlenW(msg), NULL, NULL);
-    LocalFree(msg);
 }
 
 DWORD print_str_fmt(LPWSTR out, DWORD size, LPCWSTR fmt_str, ...) {
@@ -178,7 +157,7 @@ void check_hresult(HRESULT code, LPCWSTR err_prefix) {
         return;
     }
 
-    print_err_fmt(L"Fatal error: %1!s! (Code: %2!x!)\n", err_prefix, code);
+    log_err(L"Fatal error: %1!s! (Code: %2!x!)\n", err_prefix, code);
     exit_process(code);
 }
 
@@ -186,7 +165,7 @@ void * alloc_or_die(SIZE_T num_bytes) {
     void * out = HeapAlloc(heap, HEAP_GENERATE_EXCEPTIONS, num_bytes);
 
     if (! out) {
-        print_err_fmt(L"Failed to allocate memory: %1!u!\n", num_bytes);
+        log_err(L"Failed to allocate memory: %1!u!\n", num_bytes);
         exit_process(1);
     }
 
@@ -268,14 +247,6 @@ wchar_t * copy_wstr(wchar_t * dest, const wchar_t * src) {
     return dest;
 }
 
-int wstr_len(const wchar_t * str) {
-    int i = 0;
-
-    while (str[i++]);
-
-    return i - 1;
-}
-
 BOOL wstr_eq(const wchar_t * str1, const wchar_t * str2) {
     int i = 0;
     wchar_t c1;
@@ -293,7 +264,7 @@ BOOL wstr_eq(const wchar_t * str1, const wchar_t * str2) {
 }
 
 const wchar_t * basename(const wchar_t * path) {
-    int len = wstr_len(path);
+    int len = lstrlenW(path);
     int i = len;
 
     while (i >= 0 && (path[i--] != L'\\'));

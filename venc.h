@@ -17,6 +17,7 @@
  */
 #pragma once
 #include "lib.h"
+#include "logging.h"
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>
@@ -78,6 +79,7 @@ enum gpu_vendor {
 struct args {
 	const wchar_t * filename;
 	enum eAVEncH264VProfile profile;
+	enum log_level log_level;
 	unsigned int bitrate;
 	unsigned int fps;
 	unsigned int display;
@@ -207,4 +209,4 @@ void free_display(struct display * disp);
 void free_mf_state(struct mf_state * mf);
 void free_mp4_file(struct mp4_file * mp4);
 
-void print_attrs(IMFAttributes * attrs);
+void print_attrs(enum log_level lvl, IMFAttributes * attrs);

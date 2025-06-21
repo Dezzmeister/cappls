@@ -19,6 +19,7 @@
 #include "com.h"
 #include "async_callbacks.h"
 #include "input.h"
+#include "logging.h"
 #include <propvarutil.h>
 #include <codecapi.h>
 #include <Mferror.h>
@@ -41,7 +42,7 @@ static D3D_FEATURE_LEVEL feature_levels[] = {
 void init_venc() {
 	HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
 	check_hresult(hr, L"Failed to start Media Foundation\n");
-	print_fmt(L"Initialized Media Foundation\n");
+	log_verbose(L"Initialized Media Foundation\n");
 }
 
 struct hw_encoder select_encoder(struct args * args) {
@@ -191,7 +192,7 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 		}
 
 		if (vendor == Unknown) {
-			print_err_fmt(L"Unknown DXGI adapter vendor (0x%1!x!): %2!s!\n", desc.VendorId, desc.Description);
+			log_err(L"Unknown DXGI adapter vendor (0x%1!x!): %2!s!\n", desc.VendorId, desc.Description);
 		} else if (vendor == enc->vendor) {
 			d3d.dxgi_adapter = (IDXGIAdapter *)adapter1;
 			copy_wstr(d3d.adapter_desc, desc.Description);
@@ -537,7 +538,7 @@ void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
 	}
 
 	if (mp4->media_sink) {
-		print_err_fmt(L"Tried to create media sink twice");
+		log_err(L"Tried to create media sink twice");
 		exit_process(1);
 	}
 
@@ -566,7 +567,7 @@ void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
 	if (! (sink_flags & MEDIASINK_RATELESS)) {
 		// TODO: Support media sinks that use presentation clocks for more
 		// than internal event timing
-		print_err_fmt(L"Only rateless media sinks are supported");
+		log_err(L"Only rateless media sinks are supported");
 		exit_process(1);
 	}
 
@@ -584,7 +585,8 @@ void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
 
 	release_com_obj(media_type_handler);
 
-	print_attrs((IMFAttributes *)mf->out_type);
+	log_debug(L"Output media type: \n");
+	print_attrs(Debug, (IMFAttributes *)mf->out_type);
 
 	hr = MFCreatePresentationClock(&mp4->clock);
 	check_hresult(hr, L"Failed to create presentation clock");
@@ -695,7 +697,7 @@ static struct frame_buffer * capture_video_frame(
 
 	if (nv12_frame_idx == -1) {
 		// TODO: Make buffer size configurable
-		print_err_fmt(L"No more NV12 output frames available\n");
+		log_err(L"No more NV12 output frames available\n");
 		exit_process(1);
 	}
 
@@ -722,7 +724,7 @@ static struct frame_buffer * capture_video_frame(
 		acquire_com_obj(frame, L"frame");
 
 		if (frame != disp->prev_dup_frame) {
-			print_fmt(L"Recreating BGRA8 -> NV12 conversion input\n");
+			log_verbose(L"Recreating BGRA8 -> NV12 conversion input\n");
 			create_nv12_conv_input(disp, frame);
 		}
 
@@ -841,8 +843,9 @@ void select_output_type(struct mf_state * mf) {
 		release_com_obj(type);
 	}
 
-	print_err_fmt(L"No available output types matching desired output type:\n");
-	print_attrs(old_attrs);
+	log_err(L"No available output types matching desired output type:\n");
+	log_debug(L"Old output type:\n");
+	print_attrs(Debug, old_attrs);
 	exit_process(1);
 }
 
@@ -907,7 +910,7 @@ BOOL process_mft_events(
 				check_hresult(hr, L"Failed to get sample buffer index tag");
 
 				if (nv12_frame_idx >= NUM_NV12_FRAMES) {
-					print_err_fmt(L"Sample buffer index was unexpectedly out of bounds\n");
+					log_err(L"Sample buffer index was unexpectedly out of bounds\n");
 					exit_process(1);
 				}
 
@@ -968,7 +971,7 @@ void capture_screen(
 
 	if (! mf->allocates_samples) {
 		// TODO: Allocate samples for such encoders
-		print_err_fmt(L"Encoder does not allocate samples");
+		log_err(L"Encoder does not allocate samples");
 		exit_process(1);
 	}
 
@@ -1015,7 +1018,7 @@ void capture_screen(
 			}
 
 			if (rejected_frames >= max_rejected_frames) {
-				print_err_fmt(L"Too many frames rejected (%1!d!)\n", rejected_frames);
+				log_err(L"Too many frames rejected (%1!d!)\n", rejected_frames);
 				exit_process(1);
 			}
 
@@ -1047,10 +1050,10 @@ void capture_screen(
 	);
 
 	if (marker_status == Timeout) {
-		print_err_fmt(L"Timed out waiting for end of segment marker");
+		log_err(L"Timed out waiting for end of segment marker");
 		exit_process(1);
 	} else if (marker_status == Interrupted) {
-		print_err_fmt(L"mp4 event thread was interrupted");
+		log_err(L"mp4 event thread was interrupted");
 		exit_process(1);
 	}
 
@@ -1073,20 +1076,20 @@ void capture_screen(
 	check_hresult(hr, L"Failed to create async result");
 	acquire_com_obj(result, L"result");
 
-	print_fmt(L"Finalizing mp4\n");
+	log_info(L"Finalizing mp4\n");
 	start_finalization(finalizer);
 
 	enum semaphore_status finalizer_status = wait_for_finalization(finalizer, 30 * 1000);
 
 	if (finalizer_status == Timeout) {
-		print_err_fmt(L"Finalizer timed out after 30 seconds");
+		log_err(L"Finalizer timed out after 30 seconds");
 		exit_process(1);
 	} else if (finalizer_status == Interrupted) {
-		print_err_fmt(L"Finalizer was interrupted");
+		log_err(L"Finalizer was interrupted");
 		exit_process(1);
 	}
 
-	print_fmt(L"Finalization done\n");
+	log_info(L"Finalization done\n");
 
 	release_com_obj(finalizer);
 	release_com_obj(result);
@@ -1274,8 +1277,13 @@ void free_mp4_file(struct mp4_file * mp4) {
 	(*mp4) = zero;
 }
 
-void print_attrs(IMFAttributes * attrs) {
+void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 	static wchar_t buf[4096];
+
+	if (lvl > log_level) {
+		return;
+	}
+
 	attrs->lpVtbl->LockStore(attrs);
 
 	UINT32 count;
@@ -1295,7 +1303,7 @@ void print_attrs(IMFAttributes * attrs) {
 			check_hresult(hr, L"Failed to stringify GUID");
 		}
 
-		print_fmt(L"  %1!s! = ", key_str);
+		print_lvl_fmt(lvl, L"  %1!s! = ", key_str);
 		hr = PropVariantToString(&val, buf, ARR_SIZE(buf));
 
 		if (hr == TYPE_E_ELEMENTNOTFOUND) {
@@ -1314,7 +1322,7 @@ void print_attrs(IMFAttributes * attrs) {
 			}
 		}
 
-		print_fmt(L"%1!s! (vt = %2!d!)\n", buf, val.vt);
+		print_lvl_fmt(lvl, L"%1!s! (vt = %2!d!)\n", buf, val.vt);
 
 		PropVariantClear(&val);
 	}

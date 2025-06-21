@@ -18,6 +18,7 @@
 #include "async_callbacks.h"
 #include "com.h"
 #include "venc.h"
+#include "logging.h"
 #include <Mferror.h>
 #include <propvarutil.h>
 
@@ -114,33 +115,32 @@ HRESULT __stdcall mp4_event_callback_Invoke(
 	hr = event->lpVtbl->GetValue(event, &val);
 	check_hresult(hr, L"Failed to get event value");
 
-	hr = PropVariantToString(&val, buf, ARR_SIZE(buf));
+	if (log_level >= Debug) {
+		hr = PropVariantToString(&val, buf, ARR_SIZE(buf));
 
-	if (hr == TYPE_E_ELEMENTNOTFOUND) {
-		copy_wstr(buf, L"???");
-	} else if (hr == TYPE_E_TYPEMISMATCH) {
-		copy_wstr(buf, L"!!!");
-	} else {
-		check_hresult(hr, L"Failed to convert value to string");
-	}
-
-	if (val.vt == VT_CLSID) {
-		const wchar_t * val_name = get_guid_name(val.puuid);
-
-		if (val_name) {
-			copy_wstr(buf, val_name);
+		if (hr == TYPE_E_ELEMENTNOTFOUND) {
+			copy_wstr(buf, L"???");
+		} else if (hr == TYPE_E_TYPEMISMATCH) {
+			copy_wstr(buf, L"!!!");
+		} else {
+			check_hresult(hr, L"Failed to convert value to string");
 		}
-	}
 
-	// TODO: Log levels
-	/*
-	print_fmt(
-		L"(MP4 Sink Event): [type: %1!d!] [status: 0x%2!x!] [value: %3!s!]\n",
-		type,
-		status,
-		buf
-	);
-	*/
+		if (val.vt == VT_CLSID) {
+			const wchar_t * val_name = get_guid_name(val.puuid);
+
+			if (val_name) {
+				copy_wstr(buf, val_name);
+			}
+		}
+
+		log_debug(
+			L"(mp4 Sink Event): [type: %1!d!] [status: 0x%2!x!] [value: %3!s!]\n",
+			type,
+			status,
+			buf
+		);
+	}
 
 	if (type == MEStreamSinkMarker && val.vt == VT_UI4 && val.ulVal == MFSTREAMSINK_MARKER_ENDOFSEGMENT) {
 		BOOL signal_status = ReleaseSemaphore(
@@ -249,7 +249,7 @@ ULONG __stdcall refcounted_Release(IMFAsyncCallback * super) {
 
 	if (ref == 0) {
 		UINT released_objs_count = release_all_com_objs_local(&this->held_objs);
-		print_fmt(L"(Async callback) Released %1!d! COM object(s)\n", released_objs_count);
+		log_verbose(L"(Async callback) Released %1!d! COM object(s)\n", released_objs_count);
 
 		dealloc(this);
 	}

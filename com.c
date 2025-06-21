@@ -16,6 +16,7 @@
  * along with cappls.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "com.h"
+#include "logging.h"
 
 static struct com_obj * held_objs = NULL;
 
@@ -83,7 +84,7 @@ void release_com_obj_local(struct com_obj ** objs, void * obj) {
 		curr = curr->next;
 	}
 
-	print_err_fmt(L"Attempted to release COM object that was not present in COM object list\n");
+	log_err(L"Attempted to release COM object that was not present in COM object list\n");
 }
 
 void drop_com_obj_local(struct com_obj ** objs, void * obj) {
@@ -108,7 +109,7 @@ void drop_com_obj_local(struct com_obj ** objs, void * obj) {
 		curr = curr->next;
 	}
 
-	print_err_fmt(L"Attempted to drop COM object that was not present in COM object list\n");
+	log_err(L"Attempted to drop COM object that was not present in COM object list\n");
 }
 
 UINT release_all_com_objs_local(struct com_obj ** objs) {
@@ -130,8 +131,7 @@ UINT release_all_com_objs_local(struct com_obj ** objs) {
 UINT release_com_node(struct com_obj * node, const wchar_t * context) {
 	UINT num_freed = 1;
 
-	// TODO: Log levels
-	// print_fmt(L"(Context: %1!s!): Releasing %2!s!\n", context, node->name);
+	log_debug(L"(Context: %1!s!): Releasing %2!s!\n", context, node->name);
 
 	if (node->count == 0) {
 		Release((IUnknown *)node->obj);

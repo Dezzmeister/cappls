@@ -16,6 +16,7 @@
  * along with cappls.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "args.h"
+#include "logging.h"
 
 int get_opt(int argc, const wchar_t * argv[], const wchar_t * opt) {
 	for (int i = 0; i < argc; i++) {
@@ -32,11 +33,11 @@ int get_opt(int argc, const wchar_t * argv[], const wchar_t * opt) {
 const wchar_t * get_arg(int argc, const wchar_t * argv[], const wchar_t * arg_name) {
 	wchar_t buf[256] = { 0 };
 
-	int name_len = wstr_len(arg_name);
+	int name_len = lstrlenW(arg_name);
 	int buf_len = name_len + 1;
 
 	if (buf_len >= ARR_SIZE(buf)) {
-		print_err_fmt(L"Arg name is too long\n");
+		log_err(L"Arg name is too long\n");
 		return NULL;
 	}
 

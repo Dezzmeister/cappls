@@ -27,7 +27,10 @@
 #include <mfapi.h>
 #include <mfidl.h>
 
-#define ARR_SIZE(T)				(sizeof(T) / sizeof((T)[0]))
+#define ARR_SIZE(T)								(sizeof(T) / sizeof((T)[0]))
+
+extern HANDLE std_out;
+extern HANDLE std_err;
 
 // The application's "fake" entry point. The true entry point will set up
 // stdout, stderr, a heap, and parse command line args before calling
@@ -39,8 +42,7 @@ int wmain(DWORD argc, LPCWSTR argv[]);
 // global cleanup (like releasing COM objects).
 void exit_process(UINT code);
 
-void print_fmt(LPCWSTR fmt_str, ...);
-void print_err_fmt(LPCWSTR fmt_str, ...);
+LPWSTR vfmt(LPCWSTR fmt_str, va_list args);
 DWORD print_str_fmt(LPWSTR out, DWORD size, LPCWSTR fmt_str, ...);
 void check_err(BOOL cond);
 void check_hresult(HRESULT code, LPCWSTR err_prefix);
@@ -53,7 +55,6 @@ int memcmp(const void * ptr1, const void * ptr2, size_t num);
 
 int find_wstr(const wchar_t * str, const wchar_t * substr);
 wchar_t * copy_wstr(wchar_t * dest, const wchar_t * src);
-int wstr_len(const wchar_t * str);
 BOOL wstr_eq(const wchar_t * str1, const wchar_t * str2);
 
 const wchar_t * basename(const wchar_t * path);

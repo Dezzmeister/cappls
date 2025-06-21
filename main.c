@@ -19,10 +19,12 @@
 #include "com.h"
 #include "args.h"
 #include "input.h"
+#include "logging.h"
 #include <codecapi.h>
 
 static struct args default_args = {
 	.profile = eAVEncH264VProfile_High,
+	.log_level = Info,
 	.bitrate = 12000000,
 	.fps = 60,
 	.display = 0
@@ -37,7 +39,7 @@ static struct mf_state mf = {
 static struct mp4_file mp4 = { 0 };
 
 static void print_usage(const wchar_t * exe_name) {
-	print_fmt(
+	log_info(
 		L"Usage: %1!s! (FILE) [--profile=base|main|high] [--bitrate=BITRATE] [--fps=FPS] [--display=DISPLAY]\n"
 		L"\n"
 		L"Records the screen. MP4 video will be written to (FILE). Screen recording starts when CTRL+SHIFT+.\n"
@@ -50,7 +52,14 @@ static void print_usage(const wchar_t * exe_name) {
 		L"  --fps               Sets the target frames per second.\n"
 		L"                      Default: %3!d!\n"
 		L"  --display           Sets the display to record. Displays are ordered from 0, the primary display.\n"
-		L"                      Default: %4!d!\n",
+		L"                      Default: %4!d!\n"
+		L"  --log-level         Sets the log level. Log levels range from 0 (error) to 4 (debug):\n"
+		L"                        0: Error\n"
+		L"                        1: Warning\n"
+		L"                        2: Info\n"
+		L"                        3: Verbose\n"
+		L"                        4: Debug\n"
+		L"                      Default: 2\n",
 		basename(exe_name),
 		default_args.bitrate,
 		default_args.fps,
@@ -60,7 +69,7 @@ static void print_usage(const wchar_t * exe_name) {
 }
 
 static void print_help_hint(const wchar_t * exe_name) {
-	print_err_fmt(L"For help: %1!s! --help\n", basename(exe_name));
+	log_err(L"For help: %1!s! --help\n", basename(exe_name));
 	ExitProcess(1);
 }
 
@@ -68,7 +77,7 @@ void on_combo_pressed() {
 	mp4.recording = !mp4.recording;
 
 	if (mp4.recording) {
-		print_fmt(L"Press CTRL+SHIFT+. (ctrl + shift + period) again to stop recording\n");
+		log_info(L"Press CTRL+SHIFT+. (ctrl + shift + period) again to stop recording\n");
 	}
 }
 
@@ -86,7 +95,7 @@ static struct args get_args(int argc, const wchar_t * argv[]) {
 
 	int file_idx = get_non_opt(argc, argv, 1);
 	if (file_idx == -1) {
-		print_err_fmt(L"Filename was not provided\n");
+		log_err(L"Filename was not provided\n");
 		print_help_hint(argv[0]);
 	}
 
@@ -110,7 +119,7 @@ static struct args get_args(int argc, const wchar_t * argv[]) {
 		if (bitrate_result.status) {
 			args.bitrate = bitrate_result.ui;
 		} else {
-			print_err_fmt(L"--bitrate must be an unsigned int, received %1!s!\n", bitrate_opt);
+			log_err(L"--bitrate must be an unsigned int, received %1!s!\n", bitrate_opt);
 			print_help_hint(argv[0]);
 		}
 	}
@@ -122,7 +131,7 @@ static struct args get_args(int argc, const wchar_t * argv[]) {
 		if (fps_result.status) {
 			args.fps = fps_result.ui;
 		} else {
-			print_err_fmt(L"--fps must be an unsigned int, received %1!s!\n", fps_opt);
+			log_err(L"--fps must be an unsigned int, received %1!s!\n", fps_opt);
 			print_help_hint(argv[0]);
 		}
 	}
@@ -134,7 +143,19 @@ static struct args get_args(int argc, const wchar_t * argv[]) {
 		if (display_result.status) {
 			args.display = display_result.ui;
 		} else {
-			print_err_fmt(L"--display must be an unsigned int, received %1!s!\n", display_opt);
+			log_err(L"--display must be an unsigned int, received %1!s!\n", display_opt);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * log_level_opt = get_arg(argc, argv, L"--log-level");
+	if (log_level_opt) {
+		struct convert_result log_level_result = wstr_to_ui(log_level_opt);
+
+		if (log_level_result.status) {
+			args.log_level = log_level_result.ui > Debug ? Debug : log_level_result.ui;
+		} else {
+			log_err(L"--log-level must be an unsigned int, received %1!s!\n", log_level_opt);
 			print_help_hint(argv[0]);
 		}
 	}
@@ -149,7 +170,7 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 		case CTRL_CLOSE_EVENT:
 		case CTRL_LOGOFF_EVENT:
 		case CTRL_SHUTDOWN_EVENT:
-			print_fmt(L"Interrupted (code: %1!d!)\n", ctrl_type);
+			log_info(L"Interrupted (code: %1!d!)\n", ctrl_type);
 			exit_process(0);
 			return TRUE;
 		default:
@@ -166,7 +187,7 @@ void exit_process(UINT code) {
 
 	UINT freed_obj_count = release_all_com_objs();
 
-	print_fmt(L"Released %1!d! COM object(s)\n", freed_obj_count);
+	log_verbose(L"Released %1!d! COM object(s)\n", freed_obj_count);
 
 	uninstall_hook();
 
@@ -177,6 +198,7 @@ void exit_process(UINT code) {
 
 int wmain(DWORD argc, LPCWSTR argv[]) {
 	struct args args = get_args(argc, argv);
+	set_log_level(args.log_level);
 
 	SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
@@ -187,28 +209,28 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 
 	enc = select_encoder(&args);
 	if (! enc.status) {
-		print_err_fmt(L"Failed to select an encoder\n");
+		log_err(L"Failed to select an encoder\n");
 		return 1;
 	}
-	print_fmt(L"Selected encoder: %1!s!\n", enc.name);
+	log_info(L"Selected encoder: %1!s!\n", enc.name);
 
 	d3d = select_dxgi_adapter(&enc);
 	if (! d3d.status) {
-		print_err_fmt(L"Failed to select a DXGI adapter\n");
+		log_err(L"Failed to select a DXGI adapter\n");
 		return 1;
 	}
-	print_fmt(L"Selected DXGI adapter: %1!s!\n", d3d.adapter_desc);
+	log_info(L"Selected DXGI adapter: %1!s!\n", d3d.adapter_desc);
 
 	disp = select_display(&d3d);
 	if (! disp.status) {
-		print_err_fmt(L"Failed to select a display\n");
+		log_err(L"Failed to select a display\n");
 		return 1;
 	}
-	print_fmt(L"Selected display: 0\n");
+	log_info(L"Selected display: 0\n");
 
 	mf = activate_encoder(&d3d);
 	if (! mf.status) {
-		print_err_fmt(L"Failed to activate encoder\n");
+		log_err(L"Failed to activate encoder\n");
 		return 1;
 	}
 
@@ -220,7 +242,7 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 	// TODO: Properly handle case where D3D doesn't have a frame ready
 	Sleep(20);
 	install_hook();
-	print_fmt(L"Press CTRL+SHIFT+. (ctrl + shift + period) to start recording\n");
+	log_info(L"Press CTRL+SHIFT+. (ctrl + shift + period) to start recording\n");
 	capture_screen(&disp, &mf, &mp4);
 
 	return 0;
