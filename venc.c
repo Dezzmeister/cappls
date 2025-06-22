@@ -34,11 +34,6 @@ struct in_out_stream_ids {
 	DWORD out_stream_id;
 };
 
-struct encoder_and_id {
-	GUID id;
-	int activate_arr_idx;
-};
-
 static D3D_FEATURE_LEVEL feature_levels[] = {
 	D3D_FEATURE_LEVEL_11_1,
 	D3D_FEATURE_LEVEL_11_0,
@@ -51,7 +46,7 @@ void init_venc() {
 }
 
 void list_encoders() {
-	wchar_t clsid_str[256];
+	wchar_t clsid_str[64];
 
 	MFT_REGISTER_TYPE_INFO input_type = {
 		.guidMajorType = MFMediaType_Video,
@@ -91,6 +86,7 @@ void list_encoders() {
 			hr = S_OK;
 			continue;
 		}
+		acquire_com_str(name, L"name");
 
 		int clsid_str_size = StringFromGUID2(&clsid, clsid_str, ARR_SIZE(clsid_str));
 
@@ -104,9 +100,12 @@ void list_encoders() {
 		clsid_str[37] = L'\0';
 
 		log_info(L"  [%1!s!] %2!s!\n", clsid_str + 1, name);
+		print_attrs(Verbose, 4, (IMFAttributes*)activate);
 
-		CoTaskMemFree(name);
+		release_com_obj(name);
 	}
+
+	release_com_obj(activate_arr);
 }
 
 struct hw_encoder select_encoder(struct args * args) {
@@ -138,7 +137,7 @@ struct hw_encoder select_encoder(struct args * args) {
 		.args = args
 	};
 
-	if (args->encoder_clsid_str) {
+	if (args->encoder_clsid_str[0]) {
 		hr = CLSIDFromString(args->encoder_clsid_str, &args->encoder_clsid);
 
 		if (hr == CO_E_CLASSSTRING) {
@@ -165,11 +164,12 @@ struct hw_encoder select_encoder(struct args * args) {
 			continue;
 		}
 
+		acquire_com_str(name, L"name");
+
 		enum gpu_vendor vendor = Unknown;
 
 		if (find_wstr(name, L"Intel") != -1) {
 			vendor = Intel;
-			// TODO: Test this
 		} else if (find_wstr(name, L"AMD") != -1) {
 			vendor = AMD;
 		} else if (find_wstr(name, L"NVIDIA") != -1) {
@@ -189,7 +189,7 @@ struct hw_encoder select_encoder(struct args * args) {
 			best.merit = merit;
 
 			if (best.name) {
-				CoTaskMemFree(best.name);
+				release_com_obj(best.name);
 			}
 
 			best.name = name;
@@ -198,7 +198,7 @@ struct hw_encoder select_encoder(struct args * args) {
 				break;
 			}
 		} else {
-			CoTaskMemFree(name);
+			release_com_obj(name);
 		}
 	}
 
@@ -212,14 +212,14 @@ struct hw_encoder select_encoder(struct args * args) {
 	if (best_encoder_idx == -1) {
 		log_err(L"Failed to find a suitable encoder\n");
 
-		if (args->encoder_clsid_str) {
+		if (args->encoder_clsid_str[0]) {
 			log_err(L"(No encoders with ID \"%1!s!\"\n", args->encoder_clsid_str);
 		}
 
 		exit_process(1);
 	}
 
-	best.status = 1;
+	best.is_initialized = 1;
 
 	return best;
 }
@@ -278,7 +278,6 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 		if (vendor == Unknown) {
 			if (find_wstr(desc.Description, L"Intel") != -1) {
 				vendor = Intel;
-				// TODO: Test this
 			} else if (find_wstr(desc.Description, L"AMD") != -1) {
 				vendor = AMD;
 			} else if (find_wstr(desc.Description, L"NVIDIA") != -1) {
@@ -324,15 +323,16 @@ struct d3d select_dxgi_adapter(struct hw_encoder * enc) {
 	check_hresult(hr, L"Failed to get IDXGIDevice");
 	acquire_com_obj(d3d.dxgi_device, L"d3d.dxgi_device");
 
-	d3d.status = 1;
+	d3d.is_initialized = 1;
 
 	return d3d;
 }
 
 // Creates the output segments of the BGRA8 -> NV12 pipeline, as well as the backup
 // NV12 texture. This only needs to be created once.
-static void create_nv12_frame_buffers(struct display * disp) {
+static void create_nv12_conv_pool(struct display * disp) {
 	struct d3d * d3d = disp->d3d;
+	struct args * args = d3d->enc->args;
 
 	D3D11_TEXTURE2D_DESC nv12_desc = {
 		.Width = disp->width,
@@ -349,34 +349,22 @@ static void create_nv12_frame_buffers(struct display * disp) {
 		.MiscFlags = 0
 	};
 
-	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
-		struct frame_buffer * buf = disp->nv12_frame_pool + i;
+	disp->nv12_conv_pool = alloc_or_die(args->pool_size * sizeof(struct nv12_conv));
+	disp->nv12_pool_size = args->pool_size;
+	memset(disp->nv12_conv_pool, 0, disp->nv12_pool_size * sizeof(struct nv12_conv));
 
-		if (buf->nv12_tex) {
-			release_com_obj(buf->nv12_tex);
-		}
+	for (unsigned int i = 0; i < disp->nv12_pool_size; i++) {
+		struct nv12_conv * conv = disp->nv12_conv_pool + i;
 
-		if (buf->nv12_dxgi_surface) {
-			release_com_obj(buf->nv12_dxgi_surface);
-		}
+		conv->is_free = TRUE;
 
-		if (buf->output_view) {
-			release_com_obj(buf->output_view);
-		}
-
-		if (buf->mf_buffer) {
-			release_com_obj(buf->mf_buffer);
-		}
-
-		buf->is_free = TRUE;
-
-		HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &buf->nv12_tex);
+		HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &conv->nv12_tex);
 		check_hresult(hr, L"Failed to create NV12 texture");
-		acquire_com_obj(buf->nv12_tex, L"buf->nv12_tex");
+		acquire_com_obj(conv->nv12_tex, L"conv->nv12_tex");
 
-		hr = QueryInterface(buf->nv12_tex, &IID_IDXGISurface, (void **)&buf->nv12_dxgi_surface);
+		hr = QueryInterface(conv->nv12_tex, &IID_IDXGISurface, (void **)&conv->nv12_dxgi_surface);
 		check_hresult(hr, L"Failed to get IDXGISurface from NV12 texture");
-		acquire_com_obj(buf->nv12_dxgi_surface, L"buf->nv12_dxgi_surface");
+		acquire_com_obj(conv->nv12_dxgi_surface, L"conv->nv12_dxgi_surface");
 
 		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {
 			.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D
@@ -384,23 +372,23 @@ static void create_nv12_frame_buffers(struct display * disp) {
 
 		hr = disp->video_device->lpVtbl->CreateVideoProcessorOutputView(
 			disp->video_device,
-			(ID3D11Resource *)buf->nv12_tex,
+			(ID3D11Resource *)conv->nv12_tex,
 			disp->video_processor_enum,
 			&output_view_desc,
-			&buf->output_view
+			&conv->output_view
 		);
 		check_hresult(hr, L"Failed to create video processor output view");
-		acquire_com_obj(buf->output_view, L"buf->output_view");
+		acquire_com_obj(conv->output_view, L"conv->output_view");
 
 		hr = MFCreateDXGISurfaceBuffer(
 			&IID_ID3D11Texture2D,
-			(IUnknown *)buf->nv12_dxgi_surface,
+			(IUnknown *)conv->nv12_dxgi_surface,
 			0,
 			FALSE,
-			&buf->mf_buffer
+			&conv->mf_buffer
 		);
 		check_hresult(hr, L"Failed to create MF DXGI surface buffer");
-		acquire_com_obj(buf->mf_buffer, L"buf->mf_buffer");
+		acquire_com_obj(conv->mf_buffer, L"conv->mf_buffer");
 	}
 
 	HRESULT hr = d3d->device->lpVtbl->CreateTexture2D(d3d->device, &nv12_desc, NULL, &disp->prev_nv12_frame);
@@ -479,9 +467,9 @@ struct display select_display(struct d3d * d3d) {
 	check_hresult(hr, L"Failed to create video processor");
 	acquire_com_obj(disp.video_processor, L"disp.video_processor");
 
-	create_nv12_frame_buffers(&disp);
+	create_nv12_conv_pool(&disp);
 
-	disp.status = 1;
+	disp.is_initialized = 1;
 
 	return disp;
 }
@@ -572,7 +560,7 @@ struct mf_state activate_encoder(struct d3d * d3d) {
 	mf.in_stream_id = stream_ids.in_stream_id;
 	mf.out_stream_id = stream_ids.out_stream_id;
 
-	mf.status = 1;
+	mf.is_initialized = 1;
 
 	return mf;
 }
@@ -627,16 +615,6 @@ void prepare_for_streaming(struct display * disp, struct mf_state * mf) {
 }
 
 void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
-	if (mp4->sink) {
-		release_com_obj(mp4->sink);
-		mp4->sink = NULL;
-	}
-
-	if (mp4->media_sink) {
-		log_err(L"Tried to create media sink twice");
-		exit_process(1);
-	}
-
 	HRESULT hr = MFCreateFile(
 		MF_ACCESSMODE_WRITE,
 		MF_OPENMODE_DELETE_IF_EXIST,
@@ -681,7 +659,7 @@ void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
 	release_com_obj(media_type_handler);
 
 	log_debug(L"Output media type: \n");
-	print_attrs(Debug, (IMFAttributes *)mf->out_type);
+	print_attrs(Debug, 2, (IMFAttributes *)mf->out_type);
 
 	hr = MFCreatePresentationClock(&mp4->clock);
 	check_hresult(hr, L"Failed to create presentation clock");
@@ -722,7 +700,19 @@ void create_mp4_sink(struct mf_state * mf, struct mp4_file * mp4) {
 	check_hresult(hr, L"Failed to start getting mp4 sink events");
 }
 
-struct mp4_file prepare_mp4_file(const wchar_t * name) {
+void set_mp4_output_type(struct mf_state* mf, struct mp4_file* mp4) {
+	IMFMediaTypeHandler * media_type_handler;
+	HRESULT hr = mp4->sink->lpVtbl->GetMediaTypeHandler(mp4->sink, &media_type_handler);
+	check_hresult(hr, L"Failed to get mp4 sink media type handler");
+	acquire_com_obj(media_type_handler, L"media_type_handler");
+
+	hr = media_type_handler->lpVtbl->SetCurrentMediaType(media_type_handler, mf->out_type);
+	check_hresult(hr, L"Failed to set mp4 media type");
+
+	release_com_obj(media_type_handler);
+}
+
+struct mp4_file create_mp4_file(struct mf_state * mf, const wchar_t * name) {
 	struct mp4_file mp4 = {
 		.name = name
 	};
@@ -730,6 +720,8 @@ struct mp4_file prepare_mp4_file(const wchar_t * name) {
 	PropVariantInit(&mp4.end_of_segment_val);
 	mp4.end_of_segment_val.vt = VT_UI4;
 	mp4.end_of_segment_val.ulVal = MFSTREAMSINK_MARKER_ENDOFSEGMENT;
+
+	create_mp4_sink(mf, &mp4);
 
 	return mp4;
 }
@@ -773,7 +765,17 @@ static void create_nv12_conv_input(struct display * disp, ID3D11Texture2D * fram
 	};
 }
 
-static struct frame_buffer * capture_video_frame(
+int find_available_nv12_conv(struct display * disp) {
+	for (unsigned int i = 0; i < disp->nv12_pool_size; i++) {
+		if (disp->nv12_conv_pool[i].is_free) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+static struct nv12_conv * capture_video_frame(
 	struct display * disp,
 	struct mf_state * mf,
 	LONGLONG time,
@@ -781,23 +783,16 @@ static struct frame_buffer * capture_video_frame(
 ) {
 	const struct d3d * d3d = mf->d3d;
 
-	int nv12_frame_idx = -1;
-
-	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
-		if (disp->nv12_frame_pool[i].is_free) {
-			nv12_frame_idx = i;
-			break;
-		}
-	}
+	int nv12_frame_idx = find_available_nv12_conv(disp);
 
 	if (nv12_frame_idx == -1) {
-		// TODO: Make buffer size configurable
-		log_err(L"No more NV12 output frames available\n");
-		exit_process(1);
+		log_warn(L"No more NV12 output frames available\n");
+
+		return NULL;
 	}
 
-	struct frame_buffer * nv12_frame = disp->nv12_frame_pool + nv12_frame_idx;
-	nv12_frame->is_free = FALSE;
+	struct nv12_conv * conv = disp->nv12_conv_pool + nv12_frame_idx;
+	conv->is_free = FALSE;
 
 	DXGI_OUTDUPL_FRAME_INFO frame_info;
 	IDXGIResource * desktop_resource = NULL;
@@ -807,7 +802,7 @@ static struct frame_buffer * capture_video_frame(
 	if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
 		d3d->context->lpVtbl->CopyResource(
 			d3d->context,
-			(ID3D11Resource *)nv12_frame->nv12_tex,
+			(ID3D11Resource *)conv->nv12_tex,
 			(ID3D11Resource *)disp->prev_nv12_frame
 		);
 	} else {
@@ -826,7 +821,7 @@ static struct frame_buffer * capture_video_frame(
 		hr = disp->video_context->lpVtbl->VideoProcessorBlt(
 			disp->video_context,
 			disp->video_processor,
-			nv12_frame->output_view,
+			conv->output_view,
 			0,
 			1,
 			&disp->stream
@@ -836,30 +831,30 @@ static struct frame_buffer * capture_video_frame(
 		d3d->context->lpVtbl->CopyResource(
 			d3d->context,
 			(ID3D11Resource *)disp->prev_nv12_frame,
-			(ID3D11Resource *)nv12_frame->nv12_tex
+			(ID3D11Resource *)conv->nv12_tex
 		);
 	}
 
 	d3d->context->lpVtbl->Flush(d3d->context);
 
-	if (nv12_frame->sample) {
-		release_com_obj(nv12_frame->sample);
+	if (conv->sample) {
+		release_com_obj(conv->sample);
 	}
 
-	hr = MFCreateSample(&nv12_frame->sample);
+	hr = MFCreateSample(&conv->sample);
 	check_hresult(hr, L"Failed to create MF sample");
-	acquire_com_obj(nv12_frame->sample, L"nv12_frame->sample");
+	acquire_com_obj(conv->sample, L"nv12_frame->sample");
 
-	hr = nv12_frame->sample->lpVtbl->AddBuffer(nv12_frame->sample, nv12_frame->mf_buffer);
+	hr = conv->sample->lpVtbl->AddBuffer(conv->sample, conv->mf_buffer);
 	check_hresult(hr, L"Failed to add buffer to sample");
 
-	hr = nv12_frame->sample->lpVtbl->SetSampleTime(nv12_frame->sample, time);
+	hr = conv->sample->lpVtbl->SetSampleTime(conv->sample, time);
 	check_hresult(hr, L"Failed to set sample time");
 
-	hr = nv12_frame->sample->lpVtbl->SetSampleDuration(nv12_frame->sample, duration);
+	hr = conv->sample->lpVtbl->SetSampleDuration(conv->sample, duration);
 	check_hresult(hr, L"Failed to set sample duration");
 
-	hr = SetUINT32(nv12_frame->sample, &PRIVATE_SAMPLE_BUF_IDX, nv12_frame_idx);
+	hr = SetUINT32(conv->sample, &PRIVATE_SAMPLE_BUF_IDX, nv12_frame_idx);
 	check_hresult(hr, L"Failed to tag sample with buffer index");
 
 	if (desktop_resource) {
@@ -867,7 +862,7 @@ static struct frame_buffer * capture_video_frame(
 		release_com_obj(desktop_resource);
 	}
 
-	return nv12_frame;
+	return conv;
 }
 
 void release_events(MFT_OUTPUT_DATA_BUFFER * output_buf) {
@@ -940,7 +935,7 @@ void select_output_type(struct mf_state * mf) {
 
 	log_err(L"No available output types matching desired output type:\n");
 	log_debug(L"Old output type:\n");
-	print_attrs(Debug, old_attrs);
+	print_attrs(Debug, 2, old_attrs);
 	exit_process(1);
 }
 
@@ -955,7 +950,7 @@ void handle_stream_change(
 	mf->out_stream_id = stream_ids.out_stream_id;
 
 	select_output_type(mf);
-	create_mp4_sink(mf, mp4);
+	set_mp4_output_type(mf, mp4);
 }
 
 BOOL process_mft_events(
@@ -964,6 +959,8 @@ BOOL process_mft_events(
 	struct display * disp,
 	MFT_OUTPUT_DATA_BUFFER * output_buf
 ) {
+	const unsigned int max_rejected_samples = disp->nv12_pool_size;
+
 	IMFTransform * enc = mf->d3d->enc->encoder;
 	IMFMediaEvent * event;
 
@@ -997,19 +994,34 @@ BOOL process_mft_events(
 			if (output_buf->pSample) {
 				acquire_com_obj(output_buf->pSample, L"output_buf->pSample");
 
-				hr = mp4->sink->lpVtbl->ProcessSample(mp4->sink, output_buf->pSample);
-				check_hresult(hr, L"Failed to process sample");
+				unsigned int rejected_samples = 0;
 
-				DWORD nv12_frame_idx;
-				hr = GetUINT32(output_buf->pSample, &PRIVATE_SAMPLE_BUF_IDX, &nv12_frame_idx);
-				check_hresult(hr, L"Failed to get sample buffer index tag");
+				while (rejected_samples < max_rejected_samples) {
+					hr = mp4->sink->lpVtbl->ProcessSample(mp4->sink, output_buf->pSample);
+					if (hr == MF_E_NOTACCEPTING) {
+						rejected_samples++;
+						Sleep(1);
+					} else {
+						check_hresult(hr, L"Failed to process sample");
+						break;
+					}
+				}
 
-				if (nv12_frame_idx >= NUM_NV12_FRAMES) {
-					log_err(L"Sample buffer index was unexpectedly out of bounds\n");
+				if (rejected_samples >= max_rejected_samples) {
+					log_err(L"Too many samples rejected by mp4 sink (%1!d!)\n", rejected_samples);
 					exit_process(1);
 				}
 
-				disp->nv12_frame_pool[nv12_frame_idx].is_free = TRUE;
+				DWORD nv12_conv_idx;
+				hr = GetUINT32(output_buf->pSample, &PRIVATE_SAMPLE_BUF_IDX, &nv12_conv_idx);
+				check_hresult(hr, L"Failed to get sample pool slot index tag");
+
+				if (nv12_conv_idx >= disp->nv12_pool_size) {
+					log_err(L"Sample pool slot index was unexpectedly out of bounds\n");
+					exit_process(1);
+				}
+
+				disp->nv12_conv_pool[nv12_conv_idx].is_free = TRUE;
 
 				release_com_obj(output_buf->pSample);
 			}
@@ -1028,10 +1040,13 @@ BOOL process_mft_events(
 void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
-	struct mp4_file * mp4
+	struct mp4_file * mp4,
+	const volatile BOOL * termination_signal,
+	volatile BOOL * is_ready_to_record
 ) {
 	static const long long ticks_per_s = 10000000;
-	static const int max_rejected_frames = 5;
+
+	const unsigned int max_rejected_frames = disp->nv12_pool_size;
 
 	MFT_OUTPUT_DATA_BUFFER output_buf = {
 		.dwStreamID = mf->out_stream_id
@@ -1045,9 +1060,15 @@ void capture_screen(
 
 	struct hw_encoder * enc = mf->d3d->enc;
 
-	while (! mp4->recording) {
+	while (! mp4->is_recording) {
+		*is_ready_to_record = TRUE;
 		process_messages();
+
 		Sleep(1);
+
+		if (*termination_signal) {
+			exit_process(0);
+		}
 	}
 
 	LARGE_INTEGER freq;
@@ -1076,11 +1097,15 @@ void capture_screen(
 	hr = enc->encoder->lpVtbl->ProcessMessage(enc->encoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 	check_hresult(hr, L"Failed to begin streaming (2)");
 
-	while (mp4->recording) {
+	while (mp4->is_recording) {
 		process_messages();
 
-		if (! mp4->recording) {
+		if (! mp4->is_recording) {
 			break;
+		}
+
+		if (*termination_signal) {
+			exit_process(0);
 		}
 
 		BOOL can_accept_frame = process_mft_events(mf, mp4, disp, &output_buf);
@@ -1095,25 +1120,38 @@ void capture_screen(
 			frame_ticks = now_ticks;
 			next_frame_target = frame_ticks + frame_interval;
 
-			int rejected_frames = 0;
+			unsigned int rejected_frames = 0;
+			unsigned int pool_full_frames = 0;
 
-			while (rejected_frames < max_rejected_frames) {
-				struct frame_buffer * buf = capture_video_frame(disp, mf, t - start_ticks, duration);
-				hr = enc->encoder->lpVtbl->ProcessInput(enc->encoder, mf->in_stream_id, buf->sample, 0);
+			while (rejected_frames < max_rejected_frames && pool_full_frames < max_rejected_frames) {
+				struct nv12_conv * conv = capture_video_frame(disp, mf, t - start_ticks, duration);
+				if (! conv) {
+					pool_full_frames++;
+					process_mft_events(mf, mp4, disp, &output_buf);
+					Sleep(1);
+					break;
+				}
+
+				hr = enc->encoder->lpVtbl->ProcessInput(enc->encoder, mf->in_stream_id, conv->sample, 0);
 
 				if (hr == MF_E_NOTACCEPTING) {
 					rejected_frames++;
 					process_mft_events(mf, mp4, disp, &output_buf);
 				} else {
 					check_hresult(hr, L"Failed to add sample");
-					release_com_obj(buf->sample);
-					buf->sample = NULL;
+					release_com_obj(conv->sample);
+					conv->sample = NULL;
 					break;
 				}
 			}
 
 			if (rejected_frames >= max_rejected_frames) {
-				log_err(L"Too many frames rejected (%1!d!)\n", rejected_frames);
+				log_err(L"Too many frames rejected by H.264 encoder (%1!d!)\n", rejected_frames);
+				exit_process(1);
+			}
+
+			if (pool_full_frames >= max_rejected_frames) {
+				log_err(L"NV12 converter pool was full for too long. Try increasing the pool size with --pool-size (current size is %1!d!)\n", disp->nv12_pool_size);
 				exit_process(1);
 			}
 
@@ -1200,7 +1238,7 @@ void free_hw_encoder(struct hw_encoder * enc) {
 	static const struct hw_encoder zero = { 0 };
 
 	if (enc->name) {
-		CoTaskMemFree(enc->name);
+		release_com_obj(enc->name);
 	}
 
 	if (enc->activate) {
@@ -1283,29 +1321,31 @@ void free_display(struct display * disp) {
 		release_com_obj(disp->input_view);
 	}
 
-	for (int i = 0; i < NUM_NV12_FRAMES; i++) {
-		struct frame_buffer * buf = disp->nv12_frame_pool + i;
+	for (unsigned int i = 0; i < disp->nv12_pool_size; i++) {
+		struct nv12_conv * conv = disp->nv12_conv_pool + i;
 
-		if (buf->nv12_tex) {
-			release_com_obj(buf->nv12_tex);
+		if (conv->nv12_tex) {
+			release_com_obj(conv->nv12_tex);
 		}
 
-		if (buf->nv12_dxgi_surface) {
-			release_com_obj(buf->nv12_dxgi_surface);
+		if (conv->nv12_dxgi_surface) {
+			release_com_obj(conv->nv12_dxgi_surface);
 		}
 
-		if (buf->output_view) {
-			release_com_obj(buf->output_view);
+		if (conv->output_view) {
+			release_com_obj(conv->output_view);
 		}
 
-		if (buf->mf_buffer) {
-			release_com_obj(buf->mf_buffer);
+		if (conv->mf_buffer) {
+			release_com_obj(conv->mf_buffer);
 		}
 
-		if (buf->sample) {
-			release_com_obj(buf->sample);
+		if (conv->sample) {
+			release_com_obj(conv->sample);
 		}
 	}
+
+	dealloc(disp->nv12_conv_pool);
 
 	(*disp) = zero;
 }
@@ -1372,10 +1412,16 @@ void free_mp4_file(struct mp4_file * mp4) {
 	(*mp4) = zero;
 }
 
-void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
+static void indent(enum log_level log_lvl, int indent_lvl) {
+	for (int i = 0; i < indent_lvl; i++) {
+		print_lvl_fmt(log_lvl, L" ");
+	}
+}
+
+void print_attrs(enum log_level log_lvl, int indent_lvl, IMFAttributes * attrs) {
 	static wchar_t buf[4096];
 
-	if (lvl > log_level) {
+	if (log_lvl > log_level) {
 		return;
 	}
 
@@ -1392,15 +1438,17 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 		check_hresult(hr, L"Failed to get IMFAttributes attr");
 
 		const wchar_t * key_str = get_guid_name(&key);
-		wchar_t * guid_str = NULL;
+		wchar_t * key_guid_str = NULL;
 
 		if (! key_str) {
-			hr = StringFromCLSID(&key, &guid_str);
+			hr = StringFromCLSID(&key, &key_guid_str);
 			check_hresult(hr, L"Failed to stringify GUID");
-			key_str = guid_str;
+			acquire_com_str(key_guid_str, L"key_guid_str");
+			key_str = key_guid_str;
 		}
 
-		print_lvl_fmt(lvl, L"  %1!s! = ", key_str);
+		indent(log_lvl, indent_lvl);
+		print_lvl_fmt(log_lvl, L"%1!s! = ", key_str);
 		hr = PropVariantToString(&val, buf, ARR_SIZE(buf));
 
 		if (hr == TYPE_E_ELEMENTNOTFOUND) {
@@ -1408,10 +1456,6 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 		} else if (hr == TYPE_E_TYPEMISMATCH) {
 			copy_wstr(buf, L"!!!");
 		} else {
-			if (! SUCCEEDED(hr) && guid_str) {
-				CoTaskMemFree(guid_str);
-			}
-
 			check_hresult(hr, L"Failed to convert value to string");
 		}
 
@@ -1423,10 +1467,71 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 			}
 		}
 
-		print_lvl_fmt(lvl, L"%1!s! (vt = %2!d!)\n", buf, val.vt);
+		if (IsEqualGUID(&key, &MFT_INPUT_TYPES_Attributes) || IsEqualGUID(&key, &MFT_OUTPUT_TYPES_Attributes)) {
+			if (val.vt != (VT_VECTOR | VT_UI1)) {
+				log_err(L"Expected %1!s! to be a vector of unsigned chars (vt = %2!d!)\n", key_str, val.vt);
+				continue;
+			}
 
-		if (guid_str) {
-			CoTaskMemFree(guid_str);
+			int num_types = val.cai.cElems / sizeof(MFT_REGISTER_TYPE_INFO);
+			MFT_REGISTER_TYPE_INFO * type_infos = (MFT_REGISTER_TYPE_INFO *)val.cai.pElems;
+
+			print_lvl_fmt(log_lvl, L"[\n");
+
+			for (int j = 0; j < num_types; j++) {
+				indent(log_lvl, indent_lvl + 2);
+				print_lvl_fmt(log_lvl, L"{\n");
+				const wchar_t * major_type_str = get_guid_name(&type_infos[j].guidMajorType);
+				wchar_t * major_type_guid_str = NULL;
+
+				if (! major_type_str) {
+					hr = StringFromCLSID(&type_infos[j].guidMajorType, &major_type_guid_str);
+					check_hresult(hr, L"Failed to stringify major type GUID");
+					acquire_com_str(major_type_guid_str, L"major_type_guid_str");
+					major_type_str = major_type_guid_str;
+				}
+
+				const wchar_t * subtype_str = get_guid_name(&type_infos[j].guidSubtype);
+				wchar_t * subtype_guid_str = NULL;
+
+				if (! subtype_str) {
+					hr = StringFromCLSID(&type_infos[j].guidSubtype, &subtype_guid_str);
+					check_hresult(hr, L"Failed to stringify subtype GUID");
+					acquire_com_str(subtype_guid_str, L"subtype_guid_str");
+					subtype_str = subtype_guid_str;
+				}
+
+				indent(log_lvl, indent_lvl + 4);
+				print_lvl_fmt(log_lvl, L"guidMajorType = %1!s!\n", major_type_str);
+
+				indent(log_lvl, indent_lvl + 4);
+				print_lvl_fmt(log_lvl, L"guidSubtype = %1!s!\n", subtype_str);
+
+				if (major_type_guid_str) {
+					release_com_obj(major_type_guid_str);
+				}
+
+				if (subtype_guid_str) {
+					release_com_obj(subtype_guid_str);
+				}
+
+				indent(log_lvl, indent_lvl + 2);
+
+				if (j == num_types - 1) {
+					print_lvl_fmt(log_lvl, L"}\n");
+				} else {
+					print_lvl_fmt(log_lvl, L"},\n");
+				}
+			}
+
+			indent(log_lvl, indent_lvl);
+			print_lvl_fmt(log_lvl, L"]\n");
+		} else {
+			print_lvl_fmt(log_lvl, L"%1!s! (vt = %2!d!)\n", buf, val.vt);
+		}
+
+		if (key_guid_str) {
+			release_com_obj(key_guid_str);
 		}
 
 		PropVariantClear(&val);

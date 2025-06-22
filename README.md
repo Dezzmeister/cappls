@@ -61,10 +61,9 @@ avoid copying from a single converter's output to a pool sample.
 ### TODOS
 
 - Test again with NVEnc
-- Test with an AMD encoder
 - Include the cursor in duplicated frames
-- Configurable NV12 frame pool size
 - Support for capture on one GPU and encoding on another
 - Get DXGI adapter BEFORE auto-selecting encoder
-- Option to print attributes for all encoders
 - Ability to differentiate two encoders with the same class ID
+- Timing for pipeline stages
+- Option to set keyframe interval

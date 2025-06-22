@@ -22,12 +22,16 @@ static struct com_obj * held_objs = NULL;
 
 UINT release_com_node(struct com_obj * node, const wchar_t * context);
 
-void acquire_com_obj(void * obj, const wchar_t * const name) {
+void acquire_com_obj(void * obj, const wchar_t * name) {
 	acquire_com_obj_local(&held_objs, obj, name);
 }
 
-void acquire_com_arr(void ** arr, UINT count, const wchar_t * const name) {
+void acquire_com_arr(void ** arr, UINT count, const wchar_t * name) {
 	acquire_com_arr_local(&held_objs, arr, count, name);
+}
+
+void acquire_com_str(void * str, const wchar_t * name) {
+	acquire_com_str_local(&held_objs, str, name);
 }
 
 void release_com_obj(void * obj) {
@@ -48,6 +52,7 @@ void acquire_com_obj_local(struct com_obj ** objs, void * obj, const wchar_t * n
 	next->next = *objs;
 	next->name = name;
 	next->count = 0;
+	next->is_str = FALSE;
 	*objs = next;
 }
 
@@ -57,6 +62,17 @@ void acquire_com_arr_local(struct com_obj ** objs, void ** obj, UINT count, cons
 	next->next = *objs;
 	next->name = name;
 	next->count = count;
+	next->is_str = FALSE;
+	*objs = next;
+}
+
+void acquire_com_str_local(struct com_obj ** objs, void * str, const wchar_t * name) {
+	struct com_obj * next = (struct com_obj *)alloc_or_die(sizeof(struct com_obj));
+	next->obj = str;
+	next->next = *objs;
+	next->name = name;
+	next->count = 0;
+	next->is_str = TRUE;
 	*objs = next;
 }
 
@@ -133,7 +149,9 @@ UINT release_com_node(struct com_obj * node, const wchar_t * context) {
 
 	log_debug(L"(Context: %1!s!): Releasing %2!s!\n", context, node->name);
 
-	if (node->count == 0) {
+	if (node->is_str) {
+		CoTaskMemFree(node->obj);
+	} else if (node->count == 0) {
 		Release((IUnknown *)node->obj);
 	} else {
 		IUnknown ** arr = (IUnknown **)node->obj;

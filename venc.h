@@ -30,8 +30,12 @@ DEFINE_GUID(CLSID_NVIDIA_H264_ENCODER,
 DEFINE_GUID(CLSID_INTEL_QUICKSYNC_H264_ENCODER,
 	0x4BE8D3C0, 0x0515, 0x4A37, 0xAD, 0x55, 0xE4, 0xBA, 0xE1, 0x9A, 0xF4, 0x71);
 
+// ADC9BC80-0F41-46C6-AB75-D693D793597D
+DEFINE_GUID(CLSID_AMD_H264_ENCODER,
+	0xADC9BC80, 0x0F41, 0x46C6, 0xAB, 0x75, 0xD6, 0x93, 0xD7, 0x93, 0x59, 0x7D);
+
 // 556155E0-8B27-44AC-8DBF-2547B9BD7112
-DEFINE_GUID(PRIVATE_INTEL_PCI_DEVICE_INSTANCE,
+DEFINE_GUID(PCI_DEVICE_INSTANCE,
 	0x556155E0, 0x8B27, 0x44AC, 0x8D, 0xBF, 0x25, 0x47, 0xB9, 0xBD, 0x71, 0x12);
 
 // 85E4DCCF-F1FE-4117-854D-7CDA2ACC2C77
@@ -87,6 +91,7 @@ struct args {
 	unsigned int bitrate;
 	unsigned int fps;
 	unsigned int display;
+	unsigned int pool_size;
 	BOOL list_encoders;
 };
 
@@ -97,7 +102,7 @@ struct hw_encoder {
 	wchar_t * name;
 	enum gpu_vendor vendor;
 	UINT32 merit;
-	unsigned char status;
+	BOOL is_initialized;
 };
 
 struct d3d {
@@ -107,10 +112,10 @@ struct d3d {
 	ID3D11Device * device;
 	ID3D11DeviceContext * context;
 	wchar_t adapter_desc[128];
-	unsigned char status;
+	BOOL is_initialized;
 };
 
-struct frame_buffer {
+struct nv12_conv {
 	ID3D11Texture2D * nv12_tex;
 	IDXGISurface * nv12_dxgi_surface;
 	ID3D11VideoProcessorOutputView * output_view;
@@ -136,11 +141,12 @@ struct display {
 	void * prev_dup_frame;
 	ID3D11VideoProcessorInputView * input_view;
 	D3D11_VIDEO_PROCESSOR_STREAM stream;
-	struct frame_buffer nv12_frame_pool[NUM_NV12_FRAMES];
+	struct nv12_conv * nv12_conv_pool;
+	unsigned int nv12_pool_size;
 
 	int width;
 	int height;
-	unsigned char status;
+	BOOL is_initialized;
 };
 
 struct mf_state {
@@ -154,8 +160,8 @@ struct mf_state {
 	DWORD out_stream_id;
 	UINT reset_token;
 	DWORD output_buf_size;
-	unsigned char status : 1;
-	unsigned char allocates_samples : 1;
+	BOOL is_initialized : 1;
+	BOOL allocates_samples : 1;
 };
 
 struct mp4_file {
@@ -166,7 +172,7 @@ struct mp4_file {
 	IMFPresentationClock * clock;
 	IMFAsyncCallback * event_callback;
 	PROPVARIANT end_of_segment_val;
-	BOOL recording;
+	BOOL is_recording;
 };
 
 // Initializes Media Foundation
@@ -194,9 +200,9 @@ struct mf_state activate_encoder(struct d3d * d3d);
 // Sets input and output video types on the encoder.
 void prepare_for_streaming(struct display * disp, struct mf_state * mf);
 
-// Creates a `struct mp4_file` with the given name. Does NOT create
-// a file or initialize any of the mp4 COM objects.
-struct mp4_file prepare_mp4_file(const wchar_t * name);
+// Creates a `struct mp4_file` with the given name and initializes
+// the mp4 sink.
+struct mp4_file create_mp4_file(struct mf_state * mf, const wchar_t * name);
 
 // Records the selected display until `mp4->recording` is set to false. Starts
 // recording when `mp4->recording` is set to true. Drains the message queue before
@@ -204,7 +210,9 @@ struct mp4_file prepare_mp4_file(const wchar_t * name);
 void capture_screen(
 	struct display * disp,
 	struct mf_state * mf,
-	struct mp4_file * mp4
+	struct mp4_file * mp4,
+	const volatile BOOL * termination_signal,
+	volatile BOOL * is_ready_to_record
 );
 
 // These functions release the resources held by each struct, but they do NOT
@@ -216,4 +224,4 @@ void free_display(struct display * disp);
 void free_mf_state(struct mf_state * mf);
 void free_mp4_file(struct mp4_file * mp4);
 
-void print_attrs(enum log_level lvl, IMFAttributes * attrs);
+void print_attrs(enum log_level log_lvl, int indent_lvl, IMFAttributes * attrs);

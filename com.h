@@ -20,7 +20,7 @@
 // should be called to release the COM object when it is no longer needed.
 // The `_local` variants accept a `struct com_obj **`; the others work on a global
 // list of COM objects owned by the main thread. None of these functions are threadsafe,
-// so each list of COM objects should be owned by a single thread.
+// so each thread should own a separate list of COM objects.
 // 
 // Note: `acquire_` functions don't call AddRef.
 #pragma once
@@ -34,19 +34,22 @@ struct com_obj {
 	const wchar_t * name;
 	// If nonzero, then obj points to an array of IUnknown pointers
 	UINT count;
+	BOOL is_str;
 };
 
-void acquire_com_obj(void * obj, const wchar_t * const name);
+void acquire_com_obj(void * obj, const wchar_t * name);
 // Acquires an array of COM objects. NULL elements will be skipped
 // when releasing the array. The array can be released by calling
 // `release_com_obj`.
-void acquire_com_arr(void ** arr, UINT count, const wchar_t * const name);
+void acquire_com_arr(void ** arr, UINT count, const wchar_t * name);
+void acquire_com_str(void * str, const wchar_t * name);
 void release_com_obj(void * obj);
 void drop_com_obj(void * obj);
 UINT release_all_com_objs();
 
-void acquire_com_obj_local(struct com_obj ** objs, void * obj, const wchar_t * const name);
-void acquire_com_arr_local(struct com_obj ** objs, void ** arr, UINT count, const wchar_t * const name);
+void acquire_com_obj_local(struct com_obj ** objs, void * obj, const wchar_t * name);
+void acquire_com_arr_local(struct com_obj ** objs, void ** arr, UINT count, const wchar_t * name);
+void acquire_com_str_local(struct com_obj ** objs, void * str, const wchar_t * name);
 void release_com_obj_local(struct com_obj ** objs, void * obj);
 void drop_com_obj_local(struct com_obj ** objs, void * obj);
 UINT release_all_com_objs_local(struct com_obj ** objs);

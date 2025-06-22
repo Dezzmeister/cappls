@@ -27,7 +27,7 @@ struct convert_result {
 	// be converted
 	int end_idx;
 	// TRUE if the conversion was successful, FALSE is not
-	BOOL status : 1;
+	BOOL is_valid : 1;
 };
 
 // Returns the index of a string in the args array. Unlike POSIX's `getopt`, this

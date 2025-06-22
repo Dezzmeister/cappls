@@ -76,16 +76,15 @@ struct convert_result wstr_to_ui(const wchar_t * str) {
 	struct convert_result out = {
 		.ui = 0,
 		.end_idx = 0,
-		.status = FALSE
+		.is_valid = FALSE
 	};
 
 	int i = 0;
 	wchar_t c;
 
 	while ((c = str[i]) != L'\0' && c >= L'0' && c <= L'9') {
-		out.status = TRUE;
-		out.ui *= 10;
-		out.ui += (c - L'0');
+		out.is_valid = TRUE;
+		out.ui = (out.ui * 10) + (c - L'0');
 		i++;
 	}
 
