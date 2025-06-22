@@ -34,6 +34,11 @@ struct in_out_stream_ids {
 	DWORD out_stream_id;
 };
 
+struct encoder_and_id {
+	GUID id;
+	int activate_arr_idx;
+};
+
 static D3D_FEATURE_LEVEL feature_levels[] = {
 	D3D_FEATURE_LEVEL_11_1,
 	D3D_FEATURE_LEVEL_11_0,
@@ -43,6 +48,65 @@ void init_venc() {
 	HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
 	check_hresult(hr, L"Failed to start Media Foundation\n");
 	log_verbose(L"Initialized Media Foundation\n");
+}
+
+void list_encoders() {
+	wchar_t clsid_str[256];
+
+	MFT_REGISTER_TYPE_INFO input_type = {
+		.guidMajorType = MFMediaType_Video,
+		.guidSubtype = MFVideoFormat_NV12
+	};
+
+	MFT_REGISTER_TYPE_INFO output_type = {
+		.guidMajorType = MFMediaType_Video,
+		.guidSubtype = MFVideoFormat_H264
+	};
+
+	IMFActivate ** activate_arr;
+	UINT32 count = 0;
+	HRESULT hr = MFTEnumEx(
+		MFT_CATEGORY_VIDEO_ENCODER,
+		MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+		&input_type,
+		&output_type,
+		&activate_arr,
+		&count
+	);
+	check_hresult(hr, L"Failed to enumerate encoders");
+	acquire_com_arr(activate_arr, count, L"activate_arr");
+
+	log_info(L"===== Available H.264 hardware encoders by ID =====\n");
+
+	for (unsigned int i = 0; i < count; i++) {
+		IMFActivate * activate = activate_arr[i];
+		GUID clsid;
+		wchar_t * name;
+		UINT32 name_len;
+
+		hr |= GetGUID(activate, &MFT_TRANSFORM_CLSID_Attribute, &clsid);
+		hr |= activate->lpVtbl->GetAllocatedString(activate, &MFT_FRIENDLY_NAME_Attribute, &name, &name_len);
+
+		if (! SUCCEEDED(hr)) {
+			hr = S_OK;
+			continue;
+		}
+
+		int clsid_str_size = StringFromGUID2(&clsid, clsid_str, ARR_SIZE(clsid_str));
+
+		if (! clsid_str_size) {
+			log_err(L"Class ID for encoder \"%1!s!\" was too long", name);
+			exit_process(1);
+		}
+
+		// StringFromGUID2 puts curly braces around the GUID and we don't want those;
+		// GUID is 36 chars long
+		clsid_str[37] = L'\0';
+
+		log_info(L"  [%1!s!] %2!s!\n", clsid_str + 1, name);
+
+		CoTaskMemFree(name);
+	}
 }
 
 struct hw_encoder select_encoder(struct args * args) {
@@ -69,10 +133,21 @@ struct hw_encoder select_encoder(struct args * args) {
 	check_hresult(hr, L"Failed to enumerate encoders");
 	acquire_com_arr(activate_arr, count, L"activate_arr");
 
-	UINT best_encoder_idx = 0;
+	UINT best_encoder_idx = -1;
 	struct hw_encoder best = {
 		.args = args
 	};
+
+	if (args->encoder_clsid_str) {
+		hr = CLSIDFromString(args->encoder_clsid_str, &args->encoder_clsid);
+
+		if (hr == CO_E_CLASSSTRING) {
+			log_err(L"Encoder id \"%1!s!\" is not a GUID\n", args->encoder_clsid_str);
+			exit_process(1);
+		}
+
+		check_hresult(hr, L"Failed to convert encoder argument to class ID");
+	}
 
 	for (unsigned int i = 0; i < count; i++) {
 		IMFActivate * activate = activate_arr[i];
@@ -101,7 +176,13 @@ struct hw_encoder select_encoder(struct args * args) {
 			vendor = Nvidia;
 		}
 
-		if (vendor > best.vendor || (vendor == best.vendor && merit > best.merit)) {
+		BOOL clsid_is_equal = IsEqualGUID(&clsid, &args->encoder_clsid);
+
+		if (
+			clsid_is_equal ||
+			vendor > best.vendor ||
+			(vendor == best.vendor && merit > best.merit)
+		) {
 			best_encoder_idx = i;
 			best.activate = activate;
 			best.vendor = vendor;
@@ -112,6 +193,10 @@ struct hw_encoder select_encoder(struct args * args) {
 			}
 
 			best.name = name;
+
+			if (clsid_is_equal) {
+				break;
+			}
 		} else {
 			CoTaskMemFree(name);
 		}
@@ -123,6 +208,16 @@ struct hw_encoder select_encoder(struct args * args) {
 	}
 
 	release_com_obj(activate_arr);
+
+	if (best_encoder_idx == -1) {
+		log_err(L"Failed to find a suitable encoder\n");
+
+		if (args->encoder_clsid_str) {
+			log_err(L"(No encoders with ID \"%1!s!\"\n", args->encoder_clsid_str);
+		}
+
+		exit_process(1);
+	}
 
 	best.status = 1;
 
@@ -1297,10 +1392,12 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 		check_hresult(hr, L"Failed to get IMFAttributes attr");
 
 		const wchar_t * key_str = get_guid_name(&key);
+		wchar_t * guid_str = NULL;
 
 		if (! key_str) {
-			hr = StringFromCLSID(&key, &key_str);
+			hr = StringFromCLSID(&key, &guid_str);
 			check_hresult(hr, L"Failed to stringify GUID");
+			key_str = guid_str;
 		}
 
 		print_lvl_fmt(lvl, L"  %1!s! = ", key_str);
@@ -1311,6 +1408,10 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 		} else if (hr == TYPE_E_TYPEMISMATCH) {
 			copy_wstr(buf, L"!!!");
 		} else {
+			if (! SUCCEEDED(hr) && guid_str) {
+				CoTaskMemFree(guid_str);
+			}
+
 			check_hresult(hr, L"Failed to convert value to string");
 		}
 
@@ -1323,6 +1424,10 @@ void print_attrs(enum log_level lvl, IMFAttributes * attrs) {
 		}
 
 		print_lvl_fmt(lvl, L"%1!s! (vt = %2!d!)\n", buf, val.vt);
+
+		if (guid_str) {
+			CoTaskMemFree(guid_str);
+		}
 
 		PropVariantClear(&val);
 	}

@@ -80,9 +80,14 @@ struct args {
 	const wchar_t * filename;
 	enum eAVEncH264VProfile profile;
 	enum log_level log_level;
+	// A GUID is 36 chars long, CLSIDFromString expects the GUID to be surrounded
+	// by curly braces (+ 2), and + 1 for null terminator
+	wchar_t encoder_clsid_str[36 + 2 + 1];
+	GUID encoder_clsid;
 	unsigned int bitrate;
 	unsigned int fps;
 	unsigned int display;
+	BOOL list_encoders;
 };
 
 struct hw_encoder {
@@ -166,6 +171,8 @@ struct mp4_file {
 
 // Initializes Media Foundation
 void init_venc();
+
+void list_encoders();
 
 // Selects a hardware encoder capable of encoding NV12 to H.264. Prioritizes
 // based on vendor first, then merit. Returns a zeroed struct if no encoder

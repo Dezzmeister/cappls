@@ -40,7 +40,8 @@ static struct mp4_file mp4 = { 0 };
 
 static void print_usage(const wchar_t * exe_name) {
 	log_info(
-		L"Usage: %1!s! (FILE) [--profile=base|main|high] [--bitrate=BITRATE] [--fps=FPS] [--display=DISPLAY]\n"
+		L"Usage: %1!s! (FILE) [--profile=base|main|high] [--bitrate=BITRATE] [--fps=FPS] [--display=DISPLAY] "
+		L"[--log-level=LOG_LEVEL] [--encoder=ENCODER]\n"
 		L"\n"
 		L"Records the screen. MP4 video will be written to (FILE). Screen recording starts when CTRL+SHIFT+.\n"
 		L"(ctrl + shift + period) is pressed, and ends when CTRL+SHIFT+. is pressed again.\n"
@@ -59,7 +60,12 @@ static void print_usage(const wchar_t * exe_name) {
 		L"                        2: Info\n"
 		L"                        3: Verbose\n"
 		L"                        4: Debug\n"
-		L"                      Default: 2\n",
+		L"                      Default: 2\n"
+		L"  --list-encoders     Lists all available H.264 hardware encoders. Does not accept an argument.\n"
+		L"  --encoder           Sets the H.264 hardware encoder to use. The value of this argument should\n"
+		L"                      be a GUID retrieved from `--list-encoders`.\n"
+		L"                      By default, cappls tries to select an encoder based on vendor and merit.\n"
+		L"                      Setting an `--encoder` forces cappls to use the given encoder or fail.\n",
 		basename(exe_name),
 		default_args.bitrate,
 		default_args.fps,
@@ -93,72 +99,90 @@ static struct args get_args(int argc, const wchar_t * argv[]) {
 		print_usage(argv[0]);
 	}
 
+	const wchar_t * profile_arg = get_arg(argc, argv, L"--profile");
+	if (profile_arg) {
+		if (wstr_eq(profile_arg, L"base")) {
+			args.profile = eAVEncH264VProfile_Base;
+		} else if (wstr_eq(profile_arg, L"main")) {
+			args.profile = eAVEncH264VProfile_Main;
+		} else if (wstr_eq(profile_arg, L"high")) {
+			args.profile = eAVEncH264VProfile_High;
+		}
+	}
+
+	const wchar_t * bitrate_arg = get_arg(argc, argv, L"--bitrate");
+	if (bitrate_arg) {
+		struct convert_result bitrate_result = wstr_to_ui(bitrate_arg);
+
+		if (bitrate_result.status) {
+			args.bitrate = bitrate_result.ui;
+		} else {
+			log_err(L"--bitrate must be an unsigned int, received %1!s!\n", bitrate_arg);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * fps_arg = get_arg(argc, argv, L"--fps");
+	if (fps_arg) {
+		struct convert_result fps_result = wstr_to_ui(fps_arg);
+
+		if (fps_result.status) {
+			args.fps = fps_result.ui;
+		} else {
+			log_err(L"--fps must be an unsigned int, received %1!s!\n", fps_arg);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * display_arg = get_arg(argc, argv, L"--display");
+	if (display_arg) {
+		struct convert_result display_result = wstr_to_ui(display_arg);
+
+		if (display_result.status) {
+			args.display = display_result.ui;
+		} else {
+			log_err(L"--display must be an unsigned int, received %1!s!\n", display_arg);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * log_level_arg = get_arg(argc, argv, L"--log-level");
+	if (log_level_arg) {
+		struct convert_result log_level_result = wstr_to_ui(log_level_arg);
+
+		if (log_level_result.status) {
+			args.log_level = log_level_result.ui > Debug ? Debug : log_level_result.ui;
+		} else {
+			log_err(L"--log-level must be an unsigned int, received %1!s!\n", log_level_arg);
+			print_help_hint(argv[0]);
+		}
+	}
+
+	const wchar_t * encoder_arg = get_arg(argc, argv, L"--encoder");
+	if (encoder_arg) {
+		int len = lstrlenW(encoder_arg);
+
+		if (len != 36) {
+			log_err(L"--encoder must be a 36-character GUID, received %1!s!\n", encoder_arg);
+			print_help_hint(argv[0]);
+		}
+
+		// Can't convert this to CLSID until COM is initialized
+		args.encoder_clsid_str[0] = L'{';
+		copy_wstr(args.encoder_clsid_str + 1, encoder_arg);
+		args.encoder_clsid_str[37] = L'}';
+	}
+
+	int list_encoders_idx = get_opt(argc, argv, L"--list-encoders");
+	args.list_encoders = list_encoders_idx != -1;
+
 	int file_idx = get_non_opt(argc, argv, 1);
-	if (file_idx == -1) {
+	if (file_idx == -1 && ! args.list_encoders) {
 		log_err(L"Filename was not provided\n");
 		print_help_hint(argv[0]);
 	}
 
 	args.filename = argv[file_idx];
-
-	const wchar_t * profile_opt = get_arg(argc, argv, L"--profile");
-	if (profile_opt) {
-		if (wstr_eq(profile_opt, L"base")) {
-			args.profile = eAVEncH264VProfile_Base;
-		} else if (wstr_eq(profile_opt, L"main")) {
-			args.profile = eAVEncH264VProfile_Main;
-		} else if (wstr_eq(profile_opt, L"high")) {
-			args.profile = eAVEncH264VProfile_High;
-		}
-	}
-
-	const wchar_t * bitrate_opt = get_arg(argc, argv, L"--bitrate");
-	if (bitrate_opt) {
-		struct convert_result bitrate_result = wstr_to_ui(bitrate_opt);
-
-		if (bitrate_result.status) {
-			args.bitrate = bitrate_result.ui;
-		} else {
-			log_err(L"--bitrate must be an unsigned int, received %1!s!\n", bitrate_opt);
-			print_help_hint(argv[0]);
-		}
-	}
-
-	const wchar_t * fps_opt = get_arg(argc, argv, L"--fps");
-	if (fps_opt) {
-		struct convert_result fps_result = wstr_to_ui(fps_opt);
-
-		if (fps_result.status) {
-			args.fps = fps_result.ui;
-		} else {
-			log_err(L"--fps must be an unsigned int, received %1!s!\n", fps_opt);
-			print_help_hint(argv[0]);
-		}
-	}
-
-	const wchar_t * display_opt = get_arg(argc, argv, L"--display");
-	if (display_opt) {
-		struct convert_result display_result = wstr_to_ui(display_opt);
-
-		if (display_result.status) {
-			args.display = display_result.ui;
-		} else {
-			log_err(L"--display must be an unsigned int, received %1!s!\n", display_opt);
-			print_help_hint(argv[0]);
-		}
-	}
-
-	const wchar_t * log_level_opt = get_arg(argc, argv, L"--log-level");
-	if (log_level_opt) {
-		struct convert_result log_level_result = wstr_to_ui(log_level_opt);
-
-		if (log_level_result.status) {
-			args.log_level = log_level_result.ui > Debug ? Debug : log_level_result.ui;
-		} else {
-			log_err(L"--log-level must be an unsigned int, received %1!s!\n", log_level_opt);
-			print_help_hint(argv[0]);
-		}
-	}
 
 	return args;
 }
@@ -206,6 +230,12 @@ int wmain(DWORD argc, LPCWSTR argv[]) {
 	check_hresult(hr, L"Failed to initialize COM");
 
 	init_venc();
+
+	if (args.list_encoders) {
+		list_encoders();
+
+		return 0;
+	}
 
 	enc = select_encoder(&args);
 	if (! enc.status) {
